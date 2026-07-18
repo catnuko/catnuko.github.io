@@ -23,6 +23,7 @@ const routes: RoutesConfig = {
   "/blog": true,
   "/gallery": true,
   "/demo/symbol-test": true,
+  "/demo/babylon": true,
 };
 
 const display: DisplayConfig = {

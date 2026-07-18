@@ -1,0 +1,31 @@
+---
+title: "BabylonVectorTileExtension"
+publishedAt: "2026-07-18"
+summary: "MapLibre Babylon 渲染器地形 + 3D 建筑演示，基于 BabylonVectorTileExtension 的 BabylonTerrainPrimitive 与 GeospatialCamera"
+link: "/demo/babylon"
+images:
+  - "/images/projects/BabylonVectorTileExtension/cover.png"
+
+team:
+  - name: "邱振宇"
+    role: "WebGIS 开发工程师"
+    avatar: "/images/avatar.jpg"
+    linkedIn: "https://github.com/catnuko"
+---
+
+## 演示说明
+
+本页面在 Babylon.js 三维场景中渲染 MapLibre 矢量瓦片地形，并叠加 OpenFreeMap 的 3D 建筑 fill-extrusion 图层。
+
+### 功能
+
+- **3D 地球** — 基于 Babylon.js 的 GeospatialCamera，支持自由旋转、缩放、碰撞检测
+- **矢量地形** — 使用 BabylonTerrainPrimitive 加载 OpenFreeMap bright 样式渲染矢量瓦片
+- **3D 建筑** — 叠加 OpenFreeMap building 源的 fill-extrusion 三维建筑层，按 render_height 渐变色
+- **点击拾取** — 点击任意位置在控制台输出地形拾取信息与当前相机参数
+
+### 技术栈
+
+- **Babylon.js** — Web 3D 渲染引擎（含 GeospatialCamera + ClippingBehavior）
+- **BabylonVectorTile** — MapLibre 矢量瓦片的 Babylon 渲染器
+- **OpenFreeMap** — 开源矢量瓦片服务
