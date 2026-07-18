@@ -1,0 +1,64 @@
+1:"$Sreact.fragment"
+2:I[79520,["/_next/static/chunks/42cism7i1x7iw.js","/_next/static/chunks/2lnfizjpr2mc9.js","/_next/static/chunks/2jc_osbt1-d9-.js","/_next/static/chunks/2j-w101tqjjw3.js"],""]
+3:I[74855,["/_next/static/chunks/42cism7i1x7iw.js","/_next/static/chunks/2lnfizjpr2mc9.js","/_next/static/chunks/2jc_osbt1-d9-.js","/_next/static/chunks/2j-w101tqjjw3.js"],"ProjectCard"]
+9:I[97367,["/_next/static/chunks/42cism7i1x7iw.js","/_next/static/chunks/2lnfizjpr2mc9.js","/_next/static/chunks/2jc_osbt1-d9-.js","/_next/static/chunks/2j-w101tqjjw3.js"],"OutletBoundary"]
+a:"$Sreact.suspense"
+4:T838,
+## Overview
+
+Development of a flexible and highly customizable design system using Next.js for front-end and Figma for design collaboration.
+
+## Key Features
+
+- **Component Library**: Built a set of modular, reusable UI components using React and styled-components in Next.js, focusing on accessibility and responsiveness.
+- **Theming and Customization**: Integrated a theming system that allows easy switching and customization of color palettes, typography, and layout styles using CSS variables and Figma tokens.
+- **Figma Integration**: Collaborated closely with designers by setting up a shared design library in Figma. This library was synchronized with the codebase, ensuring design handoffs were seamless and that design tokens remained consistent across both platforms.
+- **Documentation and Usage Guidelines**: Developed comprehensive documentation with Storybook to showcase components, usage patterns, and best practices, ensuring the design system is easy to adopt by other teams.
+
+## Technologies Used
+
+- **Next.js**: For fast, server-rendered React applications.
+- **Figma**: For creating and managing design assets and prototypes.
+- **Styled-Components**: For styling React components with a modular, themable approach.
+- **Storybook**: For building an interactive, documented component library.
+
+## Challenges and Learnings
+
+One key challenge was balancing the need for flexibility with the desire to maintain design consistency. The solution involved creating well-defined design tokens and establishing clear guidelines for when and how components could be customized. Additionally, setting up effective collaboration workflows between designers and developers using Figma and Git was a learning experience that greatly improved the process.
+
+## Outcome
+
+The design system is now actively used across multiple projects, leading to faster development cycles, fewer design inconsistencies, and improved collaboration between design and development teams. It has become a foundation for scaling our products efficiently while ensuring a cohesive user experience.0:{"rsc":["$","$1","c",{"children":[["$","div",null,{"className":"display-flex position-relative pt-24 flex-column fill-width max-width-m ","style":{},"children":[["$","$L2",null,{"id":"schema-webPage-/work","type":"application/ld+json","dangerouslySetInnerHTML":{"__html":"{\"@context\":\"https://schema.org\",\"@type\":\"WebPage\",\"url\":\"https://catnuko.github.io/work\",\"sameAs\":[],\"headline\":\"项目 – 星野\",\"description\":\"星野 的设计和开发项目\",\"image\":\"https://catnuko.github.io/og?title=%E9%A1%B9%E7%9B%AE%20%E2%80%93%20%E6%98%9F%E9%87%8E\",\"author\":{\"@type\":\"Person\",\"name\":\"星野\",\"url\":\"https://catnuko.github.io/about\",\"image\":{\"@type\":\"ImageObject\",\"url\":\"https://catnuko.github.io\"}}}"}}],["$","h1",null,{"className":"font-heading font-strong font-xl neutral-on-background-strong mb-l","style":{"textAlign":"center","textWrap":"balance"},"children":"项目 – 星野"}],["$","div",null,{"className":"display-flex position-relative px-l mb-40 g-xl flex-column min-width-0 fill-width ","style":{},"children":[["$","$L3","building-once-ui-a-customizable-design-system",{"priority":true,"href":"/work/building-once-ui-a-customizable-design-system","images":["/images/projects/project-01/cover-01.jpg","/images/projects/project-01/cover-02.jpg","/images/projects/project-01/cover-03.jpg","/images/projects/project-01/cover-04.jpg"],"title":"Building Once UI, a Customizable Design System","description":"Development of a flexible and highly customizable design system using Next.js for front-end and Figma for design collaboration.","content":"$4","avatars":[{"src":"/images/avatar.jpg"},{"src":"/images/projects/project-01/avatar-01.jpg"}],"link":""}],"$L5","$L6"]}]]}],null,"$L7"]}],"isPartial":false,"staleTime":300,"varyParams":null,"buildId":"9naErZaC1yKrIIHBmrg3D"}
+5:["$","$L3","simple-portfolio-builder",{"priority":true,"href":"/work/simple-portfolio-builder","images":["/images/projects/project-01/cover-04.jpg","/images/projects/project-01/video-01.mp4"],"title":"Once UI: Open-source design system","description":"","content":"","avatars":[],"link":""}]
+8:Tab7,
+## Overview
+
+In this project, I focused on automating the often tedious design handover process. The goal was to create a pipeline that converts Figma designs directly into clean, production-ready code. By integrating design tokens, component libraries, and automated workflows, this solution significantly reduced the time spent on translating design assets into code, while maintaining design consistency across the product.
+
+## Key Features
+
+- **Figma Plugin Integration**: Developed a custom Figma plugin that extracts design tokens such as colors, typography, and spacing values, and exports them in a format compatible with our codebase.
+- **Code Generation**: Integrated an automated process that translates Figma components into React code using a combination of design tokens and pre-built component templates. This allowed developers to focus more on logic and less on repetitive UI coding.
+- **Continuous Sync**: Established a CI/CD pipeline that continuously synchronizes design changes from Figma to the codebase, ensuring design updates are reflected instantly without manual intervention.
+- **Scalable Design System**: Leveraged a design system that remains the single source of truth for both designers and developers, making it easy to maintain consistency even as the product evolves.
+
+## Technologies Used
+
+- **Figma API**: For extracting design tokens and component data directly from the Figma designs.
+- **React and Next.js**: For building the front-end codebase with clean, reusable components.
+- **Styled-Components**: For managing styles dynamically using design tokens.
+- **GitHub Actions**: For automating the pipeline and syncing design changes to the repository.
+
+## Challenges and Learnings
+
+One of the biggest challenges was ensuring that the generated code was clean and maintainable. This involved setting up intelligent mapping between Figma components and React code structures, as well as managing edge cases like responsive design and conditional rendering. Additionally, the continuous synchronization required a robust error-handling system to prevent conflicts during development.
+
+## Outcome
+
+The automated Figma to code pipeline has streamlined the handoff process, cutting down design-to-development time by 40%. Designers now have more confidence that their designs will be accurately translated into code, and developers can focus on more complex logic and feature development. This project has proven the value of automation in bridging the gap between design and development.
+
+---
+
+This project demonstrates your ability to leverage automation and streamline workflows, which is highly relevant for design engineering portfolios focused on efficiency and innovation.6:["$","$L3","automate-design-handovers-with-a-figma-to-code-pipeline",{"priority":false,"href":"/work/automate-design-handovers-with-a-figma-to-code-pipeline","images":["/images/projects/project-01/cover-02.jpg","/images/projects/project-01/image-03.jpg"],"title":"Automating Design Handovers with a Figma to Code Pipeline","description":"Explore the enduring debate between using spaces and tabs for code indentation, and why this choice matters more than you might think.","content":"$8","avatars":[{"src":"/images/avatar.jpg"}],"link":"https://once-ui.com/"}]
+7:["$","$L9",null,{"children":["$","$a",null,{"name":"Next.MetadataOutlet","children":"$@b"}]}]
+b:null

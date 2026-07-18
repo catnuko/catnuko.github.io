@@ -1,0 +1,106 @@
+[
+    {
+        "id": "p1",
+        "type": "photo",
+        "title": "【摄影】树影长影",
+        "url": "/photos/p1.jpg",
+        "date": "2026-04-01",
+        "tags": [
+            "摄影",
+            "风景",
+            "黑白"
+        ],
+        "description": "光与影的对话"
+    },
+    {
+        "id": "p2",
+        "type": "photo",
+        "title": "【摄影】海岸岩石",
+        "url": "/photos/p2.jpg",
+        "date": "2026-03-28",
+        "tags": [
+            "摄影",
+            "海岸",
+            "自然"
+        ],
+        "description": "海浪拍打礁石的瞬间"
+    },
+    {
+        "id": "p3",
+        "type": "photo",
+        "title": "【摄影】孤独的身影",
+        "url": "/photos/p3.jpg",
+        "date": "2026-03-20",
+        "tags": [
+            "摄影",
+            "人文",
+            "黑白"
+        ],
+        "description": "独自面对大海"
+    },
+    {
+        "id": "p4",
+        "type": "photo",
+        "title": "【摄影】浪潮",
+        "url": "/photos/p4.jpg",
+        "date": "2026-03-15",
+        "tags": [
+            "摄影",
+            "海岸",
+            "动态"
+        ],
+        "description": "海浪的韵律"
+    },
+    {
+        "id": "p5",
+        "type": "photo",
+        "title": "【摄影】海景观景",
+        "url": "/photos/p5.jpg",
+        "date": "2026-03-10",
+        "tags": [
+            "摄影",
+            "风景",
+            "人文"
+        ],
+        "description": "远眺海平线"
+    },
+    {
+        "id": "p6",
+        "type": "photo",
+        "title": "【摄影】礁石海岸",
+        "url": "/photos/p6.jpg",
+        "date": "2026-03-05",
+        "tags": [
+            "摄影",
+            "海岸",
+            "自然"
+        ],
+        "description": "礁石与海水的交融"
+    },
+    {
+        "id": "p7",
+        "type": "photo",
+        "title": "【摄影】山脉远景",
+        "url": "/photos/p7.jpg",
+        "date": "2026-02-28",
+        "tags": [
+            "摄影",
+            "山脉",
+            "风景"
+        ],
+        "description": "层峦叠嶂"
+    },
+    {
+        "id": "p8",
+        "type": "photo",
+        "title": "【摄影】山峰之巅",
+        "url": "/photos/p8.jpg",
+        "date": "2026-02-20",
+        "tags": [
+            "摄影",
+            "山脉",
+            "黑白"
+        ],
+        "description": "雄伟的山峰"
+    }
+]
