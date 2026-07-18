@@ -53,7 +53,7 @@ export default function Post({ post, thumbnail, direction }: PostProps) {
           </Text>
           {post.metadata.tag && (
             <Text variant="label-strong-s" onBackground="neutral-weak">
-              {post.metadata.tag}
+              {Array.isArray(post.metadata.tag) ? post.metadata.tag[0] : post.metadata.tag}
             </Text>
           )}
         </Column>
