@@ -2,13 +2,14 @@ import { About, Blog, Gallery, Home, Newsletter, Person, Social, Work } from "@/
 import { Text } from "@once-ui-system/core";
 
 const person: Person = {
-  firstName: "星野",
+  firstName: "邱振宇",
   lastName: "",
-  name: "星野",
-  role: "程序员 & 摄影师",
+  name: "邱振宇",
+  role: "WebGIS 开发工程师 & 摄影师",
   avatar: "",
   email: "346746061@qq.com",
   location: "Asia/Shanghai",
+  address: "湖北省武汉市",
   languages: ["中文"],
   locale: "zh-CN",
 };
@@ -33,8 +34,8 @@ const home: Home = {
   image: "",
   label: "首页",
   title: `${person.name} 的个人网站`,
-  description: `程序员、摄影师、写作者 — ${person.name} 的个人网站`,
-  headline: <>用代码构建，用镜头记录</>,
+  description: `WebGIS 开发工程师、摄影师、写作者 — ${person.name} 的个人网站`,
+  headline: <>用代码构建数字地球，用镜头记录世界</>,
   featured: {
     display: false,
     title: <></>,
@@ -42,7 +43,7 @@ const home: Home = {
   },
   subline: (
     <>
-      我是 <Text as="span" weight="strong">{person.name}</Text>，一个程序员，也是摄影师。<br />
+      我是 <Text as="span" weight="strong">{person.name}</Text>，一个 WebGIS 开发工程师，也是摄影师。<br />
       这里记录了我的代码、照片和思考。
     </>
   ),
@@ -52,7 +53,7 @@ const about: About = {
   path: "/about",
   label: "关于",
   title: `关于 – ${person.name}`,
-  description: `了解 ${person.name} — 程序员与摄影师`,
+  description: `了解 ${person.name} — WebGIS 开发工程师与摄影师`,
   tableOfContent: {
     display: false,
     subItems: false,
@@ -69,8 +70,14 @@ const about: About = {
     title: "介绍",
     description: (
       <>
-        {person.name} 是一名程序员和摄影师，热爱用代码创造工具，
-        用镜头捕捉光影。这里记录了他的技术探索、摄影作品和生活思考。
+        从河南大学地理信息工程专业毕业后，我就一头扎进了 WebGIS 的世界——
+        从二维地图到三维地球，一做就是 {new Date().getFullYear() - 2020} 年。
+        <br /><br />
+        我是那种会把技术文档当小说读的人，尤其在 Cesium、MapLibre 这些引擎里，
+        总能挖到让人兴奋的东西。代码之外，我也喜欢端着相机出门，
+        用快门代替鼠标，去记录这个世界。
+        <br /><br />
+        这个网站就是我这两面的交汇点。如果你也对 WebGIS 或摄影感兴趣，欢迎进来坐坐。
       </>
     ),
   },
@@ -80,9 +87,18 @@ const about: About = {
     experiences: [],
   },
   studies: {
-    display: false,
+    display: true,
     title: "教育",
-    institutions: [],
+    institutions: [
+      {
+        name: "河南大学",
+        description: (
+          <>
+            地理信息工程专业 · 本科 · 2016 – 2020
+          </>
+        ),
+      },
+    ],
   },
   technical: {
     display: false,

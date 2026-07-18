@@ -6,8 +6,8 @@ excerpt: '测试文章中插入图片和各种 Emoji 表情是否能正常渲染
 date: '2026-04-12'
 tags: ["测试", "Markdown", "渲染"]
 coverImage: '/photos/p5.jpg'
-author: 星野
-copyright: "© 2026 星野. All rights reserved. 未经授权禁止转载、复制或用于商业目的。联系方式：346746061@qq.com"
+author: 邱振宇
+copyright: "© 2026 邱振宇. All rights reserved. 未经授权禁止转载、复制或用于商业目的。联系方式：346746061@qq.com"
 published: false
 ---
 

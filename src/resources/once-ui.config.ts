@@ -22,6 +22,7 @@ const routes: RoutesConfig = {
   "/work": true,
   "/blog": true,
   "/gallery": true,
+  "/demo/symbol-test": true,
 };
 
 const display: DisplayConfig = {
