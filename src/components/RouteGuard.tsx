@@ -30,7 +30,7 @@ const RouteGuard: React.FC<RouteGuardProps> = ({ children }) => {
         if (!pathname) return false;
 
         // Normalize: remove trailing slash for matching
-        const normalizedPath = pathname.replace(/\/$/, "");
+        const normalizedPath = pathname.replace(/\/$/, "") || "/";
 
         if (normalizedPath in routes) {
           return routes[normalizedPath as keyof typeof routes];
