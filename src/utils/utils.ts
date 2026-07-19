@@ -75,19 +75,18 @@ export function getPosts(customPath = ["", "", "", ""]) {
   return getMDXData(postsDir);
 }
 
-// Read articles from public/articles/ directory
+// Read articles from src/app/blog/posts/ directory
 export function getArticles(): PostData[] {
-  const articlesDir = path.join(process.cwd(), "public", "articles");
+  const articlesDir = path.join(process.cwd(), "src", "app", "blog", "posts");
   return getMDXData(articlesDir);
 }
 
-// Get a single article by slug from public/articles/
+// Get a single article by slug from src/app/blog/posts/
 export function getArticleBySlug(slug: string): PostData | null {
-  const articlesDir = path.join(process.cwd(), "public", "articles");
-  const filePath = path.join(articlesDir, `${slug}.md`);
+  const articlesDir = path.join(process.cwd(), "src", "app", "blog", "posts");
+  const filePath = path.join(articlesDir, `${slug}.mdx`);
 
   if (!fs.existsSync(filePath)) {
-    // Also try with subdirectories (category/slug)
     const articles = getArticles();
     return articles.find((a) => a.slug === slug) || null;
   }

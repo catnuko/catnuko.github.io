@@ -6,9 +6,9 @@ import fm from "front-matter";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// Auto-generate articles.json by scanning public/articles directory (recursive)
+// Auto-generate articles.json by scanning src/app/blog/posts directory (recursive)
 function autoGenerateArticlesIndex() {
-  const articlesDir = path.resolve(__dirname, "public/articles");
+  const articlesDir = path.resolve(__dirname, "src/app/blog/posts");
   const outputFile = path.resolve(__dirname, "public/data/articles.json");
 
   function findMdFiles(dir) {
@@ -29,7 +29,7 @@ function autoGenerateArticlesIndex() {
           }
           results.push(subItem);
         }
-      } else if (item.endsWith(".md")) {
+      } else if (item.endsWith(".md") || item.endsWith(".mdx")) {
         const content = fs.readFileSync(fullPath, "utf-8");
         try {
           const { attributes } = fm(content);

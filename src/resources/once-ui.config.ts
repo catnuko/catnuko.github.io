@@ -22,7 +22,8 @@ const routes: RoutesConfig = {
   "/work": true,
   "/blog": true,
   "/gallery": true,
-  "/demo/symbol-test": true,
+  "/demo": true,
+  "/demo/cesium": true,
   "/demo/babylon": true,
 };
 

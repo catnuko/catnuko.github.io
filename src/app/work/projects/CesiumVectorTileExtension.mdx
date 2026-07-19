@@ -1,0 +1,298 @@
+---
+title: "CesiumVectorTileExtension"
+publishedAt: "2026-07-18"
+summary: "Cesium 支持加载标准 Mapbox/MapLibre 矢量瓦片服务，支持 symbol、fill、line、fill-extrusion、circle、heatmap、hillshade 等图层"
+link: "/demo/cesium"
+images:
+  - "/images/projects/CesiumVectorTileExtension/cover.png"
+
+team:
+  - name: "邱振宇"
+    role: "WebGIS 开发工程师"
+    avatar: "/images/avatar.jpg"
+    linkedIn: "https://github.com/catnuko"
+---
+
+## 项目简介
+
+`CesiumVectorTileExtension` 是基于 Cesium 的矢量瓦片扩展库，让 Cesium 三维球能够原生加载符合 [MapLibre Style Specification](https://maplibre.org/maplibre-style-spec/) 的矢量瓦片服务。开发者可以用熟悉的 JSON 样式描述地图的视觉表现，而无需手动解析 MVT/PBF。
+
+### 能力矩阵
+
+支持以下 7 类 [MapLibre Style Specification](https://maplibre.org/maplibre-style-spec/) 图层：
+
+- `symbol` — 文字、图标（地名、POI），数据源：OpenMapTiles
+- `fill` / `line` — 行政区划、道路、水系，数据源：矢量瓦片
+- `circle` — 点状要素（事件、传感器），数据源：GeoJSON / 矢量瓦片
+- `heatmap` — 密度可视化，数据源：GeoJSON / 矢量瓦片
+- `hillshade` — 山体阴影、地形增强，数据源：栅格 DEM 瓦片
+- `fill-extrusion` — 3D 建筑（拉伸体），数据源：矢量瓦片
+
+---
+
+## 1. 填充与线（fill / line）
+
+### 示例介绍
+
+视图聚焦亚洲，可以看到国家与省级行政区划以不同色块填充（`fill`），相邻边界描边（`line`）。`fill` 控制多边形面，`line` 控制线状要素（道路、河流、行政边界线）。
+
+### 示例图片
+
+![填充与线示例](/images/projects/CesiumVectorTileExtension/mlt.png)
+
+### 关键代码
+
+```ts
+const collection = new VectorTileExtension.SymbolStyleCollection({
+  viewer,
+  clampTo3DTile: false,
+  geoway: false,
+});
+await collection.readyPromise;
+
+await collection.addStyleUrl('https://tiles.openfreemap.org/styles/bright');
+```
+
+### 代码说明
+
+- `fill-color` 与 `line-color` 都支持 MapLibre 表达式（`interpolate` / `match` / `case`），无需后处理。
+- `fill-opacity` 可与 3D 地球的地形/影像层叠，形成半透明效果。
+- `line-width` 同样可写表达式，按 zoom 或属性字段动态变化。
+
+---
+
+## 2. 圆点图层（circle）
+
+### 示例介绍
+
+图中所有红色圆点是全球近一个月的地震事件（GeoJSON 数据源），半径代表震级。这是 `circle` 图层的典型应用：在地球上批量渲染点状要素。
+
+### 示例图片
+
+![圆点图层示例](/images/projects/CesiumVectorTileExtension/circle.png)
+
+### 关键代码
+
+```ts
+const collection = new VectorTileExtension.SymbolStyleCollection({
+  viewer,
+  geoway: false,
+  style: {
+    version: 8,
+    layers: [
+      {
+        id: 'earthquakes-layer',
+        type: 'circle',
+        source: 'earthquakes',
+        paint: {
+          'circle-radius': 4,
+          'circle-stroke-width': 2,
+          'circle-color': 'red',
+          'circle-stroke-color': 'white',
+        },
+      },
+    ],
+    sources: {
+      earthquakes: {
+        type: 'geojson',
+        data: 'https://maplibre.org/maplibre-gl-js/docs/assets/earthquakes.geojson',
+      },
+    },
+  },
+});
+```
+
+### 代码说明
+
+- `geoway: false` 表示使用 **地理坐标（经纬度）** 直接绘制；设置为 `true` 则启用 Geoway 模式（吸附到 3D 地形或矢量瓦片网格）。
+- `circle` 图层会自动按相机视锥剔除，百万级点性能依旧流畅。
+- `circle-radius` 同样支持基于属性字段的表达式，例如 `['interpolate', ['linear'], ['get', 'mag'], 0, 2, 7, 12]`。
+- `source` 既可以是 `geojson` 直接拉取远程数据，也可以是 `vector` 矢量瓦片源。
+
+---
+
+## 3. 热力图（heatmap）
+
+### 示例介绍
+
+使用与地震相同的 GeoJSON 数据，但切换为 `heatmap` 图层渲染：以颜色深浅表示事件密度，可以直观看到全球地震带的分布（环太平洋火山带最为明显）。
+
+### 示例图片
+
+![热力图示例](/images/projects/CesiumVectorTileExtension/heatmap.png)
+
+### 关键代码
+
+```ts
+const collection = new VectorTileExtension.HeatmapStyleCollection({
+  viewer,
+  style: {
+    version: 8,
+    sources: {
+      earthquakes: {
+        type: 'geojson',
+        data: 'https://maplibre.org/maplibre-gl-js/docs/assets/earthquakes.geojson',
+      },
+    },
+    layers: [
+      {
+        id: 'earthquakes-heat',
+        type: 'heatmap',
+        source: 'earthquakes',
+        paint: {
+          'heatmap-weight': ['interpolate', ['linear'], ['get', 'mag'], 0, 0, 6, 1],
+          'heatmap-intensity': 1,
+          'heatmap-radius': ['interpolate', ['linear'], ['zoom'], 0, 2, 9, 20],
+          'heatmap-opacity': 0.8,
+          'heatmap-color': [
+            'interpolate', ['linear'], ['heatmap-density'],
+            0, 'rgba(33,102,172,0)',
+            0.2, 'rgb(103,169,207)',
+            0.4, 'rgb(209,229,240)',
+            0.6, 'rgb(253,219,199)',
+            0.8, 'rgb(239,138,98)',
+            1, 'rgb(178,24,43)',
+          ],
+        },
+      },
+    ],
+  },
+});
+```
+
+### 代码说明
+
+- 使用 `HeatmapStyleCollection` 复用热力图 GPU 渲染管线，性能优于 CPU 端聚合。
+- `heatmap-color` 渐变表达式决定密度映射；`heatmap-radius` 配合 zoom 级别做 LOD。
+- `heatmap-weight` 用 `mag`（震级）作为权重，让大震级更显著。
+
+---
+
+## 4. 山体阴影（hillshade）
+
+### 示例介绍
+
+把全球 DEM 栅格瓦片叠在 Cesium 地形上，得到黑白灰度的山体阴影效果，强化地形起伏的视觉表达。`hillshade` 是栅格图层，常与矢量数据叠加形成"光影 + 注记"组合。
+
+### 示例图片
+
+![山体阴影示例](/images/projects/CesiumVectorTileExtension/hillshade.png)
+
+### 关键代码
+
+```ts
+const hillshade = new VectorTileExtension.HillshadeStyleCollection({
+  viewer,
+  style: {
+    version: 8,
+    sources: {
+      dem: {
+        type: 'raster-dem',
+        tiles: ['https://demotiles.maplibre.org/tiles/{z}/{x}/{y}.png'],
+        tileSize: 256,
+      },
+    },
+    layers: [
+      {
+        id: 'hillshade-layer',
+        type: 'hillshade',
+        source: 'dem',
+        paint: {
+          'hillshade-shadow-color': '#000000',
+          'hillshade-highlight-color': '#ffffff',
+          'hillshade-accent-color': '#000000',
+          'hillshade-exaggeration': 0.5,
+        },
+      },
+    ],
+  },
+});
+```
+
+### 代码说明
+
+- `raster-dem` 数据源接入标准 XYZ 栅格瓦片，自动按相机视锥加载。
+- `hillshade-exaggeration` 控制阴影夸张系数；与 Cesium 原生 terrain 配合可显著提升地形立体感。
+- 三种颜色（`shadow` / `highlight` / `accent`）分别对应背光、迎光与坡度剧烈的山脊/河谷。
+
+---
+
+## 5. 三维建筑（fill-extrusion）
+
+### 示例介绍
+
+基于 OpenFreeMap 的 building 图层，所有建筑按 `render_height` 字段拉伸生成 3D 体积，按高度渐变上色，形成漂亮的 2.5D 城市天际线效果。配合 §6 综合演示可在同一张地图中看到完整城市轮廓。
+
+### 关键代码
+
+```ts
+const buildings = new VectorTileExtension.FillExtrusionStyleCollection({
+  viewer,
+  style: {
+    version: 8,
+    sources: {
+      openfreemap: {
+        type: 'vector',
+        url: 'https://tiles.openfreemap.org/styles/liberty',
+      },
+    },
+    layers: [
+      {
+        id: 'building-extrusion',
+        type: 'fill-extrusion',
+        source: 'openfreemap',
+        'source-layer': 'building',
+        paint: {
+          'fill-extrusion-color': [
+            'interpolate', ['linear'], ['get', 'render_height'],
+            0, '#dfe6e9',
+            50, '#74b9ff',
+            150, '#0984e3',
+          ],
+          'fill-extrusion-height': ['get', 'render_height'],
+          'fill-extrusion-opacity': 0.9,
+        },
+      },
+    ],
+  },
+});
+```
+
+### 代码说明
+
+- `FillExtrusionStyleCollection` 把多边形按高度字段做几何拉伸，自动接入 Cesium 场景图。
+- `fill-extrusion-color` 用 `interpolate` 表达式按 `render_height` 渐变着色。
+- `fill-extrusion-base` 可选，控制底部高度，实现"下挖"或"漂浮"效果。
+- 适合做城市可视化的项目展示、规划评审、应急疏散等场景。
+
+---
+
+## 6. 综合演示
+
+### 示例介绍
+
+把 symbol / fill / line / circle / heatmap / hillshade / fill-extrusion 多个图层组合起来，在同一张地图上呈现完整的样式效果。所有图层通过左上角 dat.GUI 面板可显隐切换。
+
+### 示例图片
+
+![综合演示示例](/images/projects/CesiumVectorTileExtension/all2.png)
+
+### 关键代码
+
+```ts
+const collection = new VectorTileExtension.SymbolStyleCollection({
+  viewer,
+  clampTo3DTile: false,
+  geoway: false,
+});
+await collection.readyPromise;
+
+await collection.addStyleUrl('https://tiles.openfreemap.org/styles/bright');
+```
+---
+
+## 技术栈
+
+- **Cesium** — 三维地球渲染引擎
+- **MapLibre Style Spec** — 矢量瓦片样式描述标准
+- **dat.GUI** — 可视化控制面板
