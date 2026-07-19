@@ -1,0 +1,174 @@
+---
+title: "3D Tiles Next 新标准解读与 Cesium 适配实战"
+summary: "3D Tiles 1.0 在 2019 年成为 OGC 社区标准之后，支撑了几乎所有的 Web 端三维 GIS 应用。但五年过去，1.0 的几个设计缺陷越来越明显——元数据方案太受限、隐式切片的定义不够清晰、glTF 生态发展带来的不兼容。"
+publishedAt: "2025-06-30"
+tag: "WebGIS"
+---
+
+3D Tiles 1.0 在 2019 年成为 OGC 社区标准之后，支撑了几乎所有的 Web 端三维 GIS 应用。但五年过去，1.0 的几个设计缺陷越来越明显——元数据方案太受限、隐式切片的定义不够清晰、glTF 生态发展带来的不兼容。
+
+2024 年底 3D Tiles 1.1（社区叫 "3D Tiles Next"）正式发布，针对这些问题做了系统性的重构。如果你正在维护基于 CesiumJS 的三维项目，这篇文章值得认真看——不只是新标准是什么，还有如何在现有项目中落地。
+
+## 1.0 的三个致命缺陷
+
+用了三年 3D Tiles，我对 1.0 最头疼的点是这三个：
+
+**缺陷一：Batch Table 的 JSON 太臃肿**
+
+在 3D Tiles 1.0 里，每个 b3dm 瓦片内部有一个 Batch Table，存储了每个要素（比如每个建筑、每根管道）的属性信息。这个 Batch Table 是一个 JSON 拼接的二进制块——10000 个建筑的 `height`、`area`、`owner` 等属性全部塞在一个 JSON 里，压缩后也有几百 KB。更糟的是，解析这个 JSON 需要一次性加载到内存，如果你的瓦片里有几十万个要素，JavaScript 解析这个 JSON 可能要上百毫秒——每个瓦片加载都卡一下，体验非常差。
+
+**缺陷二：隐式切片定义模糊**
+
+3D Tiles 用 `tileset.json` 定义瓦片结构。1.0 支持两种结构：显式（手写每个瓦片的 boundingVolume 和 transform）和隐式（通过算法自动推算子瓦片）。隐式切片的定义方式过于灵活——可以用四叉树、八叉树、K-d 树等各种分割方案，但没有规定具体的元数据描述格式。结果是每个工具链对隐式切片的实现都不一样，A 工具生成的 tileset B 工具读不懂。
+
+**缺陷三：元数据只能挂给 Feature，不能挂给 Tile**
+
+Batch Table 的元数据只能绑定到"要素"层级。"这个瓦片是什么分辨率？这个瓦片是第几层 LOD？"——这些瓦片级别的元数据在 1.0 里没地方放，只能看着文件名自己推导。
+
+## 1.1 的核心变化
+
+**变化一：Property Tables 取代 Batch Table**
+
+Batch Table 被废弃。新的属性存储方案叫 Property Tables——实质上是把属性数据存成结构化数组，每个属性一个独立的数组，不再包在一个 JSON 里：
+
+```
+旧 Batch Table：
+{
+    "height": [45.2, 52.0, 38.7, ...],
+    "owner": ["张三", "李四", "王五", ...]
+}
+JSON → 解析 → 内存
+
+新 Property Table：
+height:  Float32Array([45.2, 52.0, 38.7, ...])
+owner:   StringArray(["张三", "李四", "王五", ...])
+二进制 → 零拷贝 → 内存映射
+```
+
+JSON 变成二进制数组后，不需要解析。直接内存映射（memory map），访问 `height[5000]` 就是一次数组索引操作。这个改动看似不大，但在大量级场景下效果显著——原来加载一个包含 50000 个建筑的瓦片，JSON 解析要 120ms，现在直接内存映射，几乎零开销。
+
+**变化二：Implicit Tiling 标准化**
+
+3D Tiles 1.1 对隐式切片做了一刀切的标准化：只支持两种划分方案——四叉树（QUADTREE，适用于地表数据）和八叉树（OCTREE，适用于点云和体数据）。划分规则在 `tileset.json` 里用一个 `implicitTiling` 对象明确描述：
+
+```json
+{
+    "root": {
+        "boundingVolume": {
+            "box": [0, 0, 0, 1000, 0, 0, 0, 1000, 0, 0, 0, 100]
+        },
+        "implicitTiling": {
+            "subdivisionScheme": "QUADTREE",
+            "subtreeLevels": 5,
+            "maximumLevel": 10,
+            "subtrees": {
+                "uri": "subtrees/{level}/{x}/{y}.subtree"
+            }
+        }
+    }
+}
+```
+
+`subtreeLevels: 5` 表示每个 subtree 包含 5 个层级的瓦片（即 1 + 4 + 16 + 64 + 256 = 341 个瓦片）。Subtree 是一个独立的二进制文件，里面打包了这部分瓦片的所有信息——哪些瓦片存在、各自的 boundingVolume 是什么、内容文件 URL 是什么。
+
+这个设计的巧妙之处：它把一个巨大的、可能有几百万个瓦片的 tileset，分拆成一个个独立的 subtree 文件。Cesium 只需要下载当前视野相关的 subtree（通常一个 subtree 就够了），不需要解析完整的 tileset.json。对于全国级别的点云数据，tileset.json 可能有几百 MB，而 subtree 文件只有几十 KB。
+
+**变化三：Tile Metadata 正式引入**
+
+Tile 级别的元数据终于有了官方支持。你可以给每个瓦片标记它的分辨率、误差范围、更新日期：
+
+```json
+{
+    "schema": {
+        "classes": {
+            "tile": {
+                "properties": {
+                    "geometricError": { "type": "FLOAT32" },
+                    "updateDate": { "type": "STRING" },
+                    "maxLOD": { "type": "INT32" }
+                }
+            }
+        }
+    },
+    "root": {
+        "metadata": {
+            "class": "tile",
+            "properties": {
+                "geometricError": 2.5,
+                "updateDate": "2026-07-15",
+                "maxLOD": 3
+            }
+        }
+    }
+}
+```
+
+这个功能看似简单，但它让 Cesium 可以在加载瓦片之前就知道要不要加载。比如 `maxLOD: 3`——如果你的系统当前只显示到 LOD 2，这个瓦片你就可以跳过，不做网络请求。在移动设备上，这个优化能省掉大量不需要的下载和解码开销。
+
+## CesiumJS 的适配现状
+
+CesiumJS 1.120+ 开始支持 3D Tiles 1.1，但默认行为仍然兼容 1.0。也就是说，老项目的旧 3D Tiles 数据继续正常加载，不需要任何改动。
+
+启用 1.1 新特性需要两步：
+
+**第一步：检查数据是否为 1.1 格式**
+
+在 tileset.json 里找 `schemaUri` 或 `schema` 字段——这是 1.1 的标志。如果有，Cesium 会自动使用 1.1 解析路径。
+
+```javascript
+const tileset = await Cesium.Cesium3DTileset.fromUrl('/data/city-1.1/tileset.json');
+
+// 检查是否成功识别为 1.1
+console.log(tileset.schema);  // 非 null 就是 1.1
+```
+
+**第二步：读取元数据**
+
+1.1 的元数据 API 跟 1.0 完全不同：
+
+```javascript
+// 旧 1.0：通过 batchId 读取
+const feature = tileset.getFeature(batchId);
+const height = feature.getProperty('height');
+
+// 新 1.1：通过 Property Table 读取
+const metadata = content.tileset.metadata;
+const propertyTable = metadata.getPropertyTable('buildings');
+const heights = propertyTable.getProperty('height');  // 返回 TypedArray
+```
+
+注意 `getProperty` 在 1.1 里返回的是 TypedArray，不是单个值。因为数据按列存储，一次读取返回整列——你可以拿到整个 `Float32Array`，然后做批量操作（比如 GPU 上传），比逐行读取快得多。
+
+**第三步：样式适配**
+
+3D Tiles 1.1 的样式系统也变了。老样式：
+
+```javascript
+tileset.style = new Cesium.Cesium3DTileStyle({
+    color: "(${height} > 50) ? color('red') : color('blue')"
+});
+```
+
+1.1 里，样式通过 `tileset.style` 仍然有效（Cesium 内部做了兼容），但表达式变量名要从旧 batch table 的 flat namespace 迁移到新的 `metadata.xxx` 路径：
+
+```javascript
+tileset.style = new Cesium.Cesium3DTileStyle({
+    color: "(${metadata.buildings.height} > 50) ? color('red') : color('blue')"
+});
+```
+
+如果你的样式文件很多很复杂，这个迁移工作量不小。Cesium 团队提供了兼容层——旧表达式写法的样式在 1.1 数据上仍然能跑，但会触发一个 deprecation warning。生产环境建议迁移。
+
+## 迁移建议
+
+如果你的 3D Tiles 数据是自己生产的，可以考虑升级到 1.1：
+
+1. **先用 Cesium ion 在线转换工具测试**。上传 1.0 的 tileset，ion 可以输出 1.1 格式。先拿一小块区域做转换，验证 CesiumJS 加载正常、样式渲染正常、性能变化明显后再全量转换。
+
+2. **Property Table 的收益取决于数据量**。如果你的瓦片每个只有几百个要素，Batch Table 的 JSON 解析开销可以忽略，从 1.0 升到 1.1 感知不到变化。要素量上万的才值得升。
+
+3. **Implicit Tiling 适用于自建的点云和倾斜摄影数据**。如果你用的是 Cesium ion 托管的全球 3D Tiles，ion 已经处理好了切片，你不用操心。但如果你自己从激光雷达原始数据建立点云 3D Tiles，Implicit Tiling 的 subtree 方案能大幅减少 tileset.json 的体积，特别是全国范围的数据。
+
+4. **不要急着在生产环境全量切换**。1.1 在 CesiumJS 中的支持还在完善——一些边缘场景（比如混合 1.0 和 1.1 的瓦片在同一 tileset 里、自定义 Shader 与 Property Table 的交互）可能还有 bug。建议新建项目直接用 1.1，老项目继续用 1.0 直到有明确的迁移需求。
+
+长远看，3D Tiles 1.1 是一个纯粹的改进——它没有移除任何核心功能，只是让存储格式更高效、切片方案更标准化。但短期来看，工具链（FME、Cesium ion、各类开源转换工具）对 1.1 的支持还在追赶中。有些工具生成的 1.1 tileset，schema 定义不全或 subtree 结构不符合规范，Cesium 加载会报错。建议转换后用 Cesium 的 `validateTileset` 工具跑一遍。

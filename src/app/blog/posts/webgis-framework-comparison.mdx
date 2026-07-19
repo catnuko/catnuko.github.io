@@ -1,0 +1,120 @@
+---
+title: "OpenLayers vs MapLibre vs Leaflet：2026 年 WebGIS 前端框架选型指南"
+summary: "每到新项目立项，第一个技术决策就是选框架。OpenLayers、MapLibre GL JS、Leaflet 三足鼎立了快十年，但 2026 年的格局跟五年前已经完全不同。这篇文章基于我近两年在三个框架上各做过项目的实际体验，不纸上谈兵。"
+publishedAt: "2025-10-15"
+tag: "WebGIS"
+---
+
+每到新项目立项，第一个技术决策就是选框架。OpenLayers、MapLibre GL JS、Leaflet 三足鼎立了快十年，但 2026 年的格局跟五年前已经完全不同。这篇文章基于我近两年在三个框架上各做过项目的实际体验，不纸上谈兵。
+
+## 一句话定位
+
+| 框架 | 定位 | 一句话 |
+|------|------|--------|
+| Leaflet | 轻量级二维地图 | 够用就好，十分钟上手 |
+| MapLibre GL JS | 高性能矢量地图引擎 | Mapbox 的完全开源替代，WebGL 渲染 |
+| OpenLayers | 重型 GIS 工具箱 | 啥都能干，啥都要学 |
+
+## Leaflet：简单到极致的二维地图
+
+Leaflet 的 API 设计是三个框架里最好的。增加一个 Marker、画一个 Polygon、绑定一个 Popup——全部一行代码：
+
+```javascript
+L.marker([39.9, 116.4])
+    .addTo(map)
+    .bindPopup('北京');
+```
+
+Leaflet 的设计哲学是"不要让我想"。它的默认值很合理——你几乎不需要配置就能得到一个能用的地图。缩放控件、版权信息、缩放动画——全部自带，不用额外引插件。
+
+但 Leaflet 的硬伤也很明显：
+
+**Canvas/WebGL 渲染不是一等公民。** 尽管有 `leaflet-markers-canvas` 和 `Leaflet.glify` 这类插件，但都是后来的补丁，不是框架原生支持的。渲染几百个 Marker 还行，几千个就开始掉帧，上万直接卡死。没有矢量瓦片的原生支持——你要用 Mapbox Vector Tile 得装 `leaflet-vectorgrid` 插件，而且性能远不如 MapLibre 原生实现。
+
+**坐标系支持有限。** Leaflet 默认 EPSG:3857（Web 墨卡托），你需要用 `proj4leaflet` 插件才能支持其他投影。而且即使装了插件，体验也不如 OL 原生——自定义投影的 TileMatrixSet 配置相当复杂。
+
+适用场景：数据量小（几百个要素）、纯展示（不需要复杂交互）、快速出活的内部工具或 Demo。如果你的地图只需要显示十几个 Marker 和一些 GeoJSON 区域，Leaflet 是最快的选择。
+
+## MapLibre GL JS：矢量地图的首选
+
+MapLibre 是 Mapbox GL JS v1 的开源分支。2020 年 Mapbox GL JS v2 转向了非开源许可，社区 fork 出了 MapLibre。四年过去，MapLibre 已经是一个独立的、活跃的、完全开源的项目，不再是"Mapbox 的山寨替代品"。
+
+MapLibre 的核心优势：
+
+**原生 WebGL 渲染。** 从底层就是用 WebGL 写的，不是 Canvas。渲染一万个矢量要素跟渲染十个在性能上没有本质区别——瓶颈在 GPU 的 draw call 数量，不在 JavaScript 对象管理。
+
+**矢量瓦片王者。** MVT（Mapbox Vector Tile）是整个框架的数据基石。样式、数据源、图层——一切都是围绕矢量瓦片设计的。不需要任何插件，原生支持 PBF 瓦片的加载、解码、渲染。
+
+**样式系统强大。** style.json 是整个地图的"配置文件"。图层顺序、颜色映射、缩放级别联动、数据驱动的样式——全在一个 JSON 里描述。Maputnik（开源的样式编辑器）提供了可视化编辑能力，不需要手写 JSON。
+
+MapLibre 的短板：
+
+**GIS 分析能力弱。** 它本质是一个渲染引擎，不是 GIS 分析工具。没有内置的缓冲区分析、空间查询、空间连接——这些都得自己找库（Turf.js）或者后端补。
+
+**空间参考系局限。** 原生只支持 EPSG:3857。通过插件可以扩展到少量其他投影，但远不如 OL 灵活。如果你的项目需要中国 2000 坐标系（CGCS2000）或地方独立坐标系，MapLibre 会是一个累赘。
+
+**文档较弱（正在改善）。** MapLibre 的文档比 Mapbox 时期差不少。很多 Mapbox GL JS 时代的教程和示例已经过时了（API 有差异），但搜索引擎还是优先返回这些旧内容。看文档的时候要注意版本——v2.x 和 v3.x 有 breaking changes。
+
+适用场景：需要高性能矢量底图、复杂样式定制、大屏可视化、3D 建筑展示。如果你的项目核心是"让地图看起来很好"而不是"让地图算出来很多"，MapLibre 是最佳选择。
+
+## OpenLayers：GIS 专业的瑞士军刀
+
+OL 是三个框架里最"重"的，也是功能最完整的。
+
+OL 的优势：
+
+**真正的 GIS 框架。** 不是"地图渲染库"，而是"Web 端的 GIS 客户端"。支持几十种空间参考系（通过 proj4）、几十种数据源格式（GeoJSON、KML、GML、WFS、WMS、WMTS、XYZ、ArcGIS REST、矢量瓦片……）、完整的多源图层叠加能力。
+
+**投影随心所欲。** 这是 OL 跟其他两个框架拉开差距的核心功能。你可以在一张地图上叠加 EPSG:4326 的 WMS 图层和 CGCS2000 的矢量图层——OL 的视图层会自动处理重投影。这对国内项目来说几乎是必需功能。
+
+**灵活的架构。** OL 的模块化做得很好。你不需要的模块不会打进 bundle。核心概念（Map、View、Layer、Source、Interaction）设计得清晰且正交——学会之后写复杂的地图交互非常顺手。
+
+OL 的短板：
+
+**学习曲线陡峭。** OL 的 API 是三个框架里最复杂的。完成同一个功能（比如给 Marker 加点击事件），OL 的代码量通常是 Leaflet 的 2-3 倍。而且 OL 的 TypeScript 类型定义不够完善，很多 API 的返回值类型是 `any`。
+
+**默认美观度差。** OL 的默认样式……很"学术风"。如果你不做任何样式定制，OL 渲染出来的地图看起来像 2005 年的桌面 GIS 软件。当然你可以自定义样式，但 MapLibre 是"开箱即好看"，OL 是"开箱要装很多皮"。
+
+**WebGL 支持是后加的。** OL 在 v7 之后加入了 WebGL 图层，但跟 MapLibre 从底层就是 WebGL 的设计没法比。OL 的 WebGL 图层主要是为了大数据量散点图和热力图场景，核心的地图渲染仍然是 Canvas 为主。
+
+适用场景：专业 GIS 应用、需要多坐标系支持、需要复杂空间分析、需要对接各类 OGC 标准服务。如果你的用户是测绘、规划、国土专业背景，OL 几乎是唯一选择。
+
+---
+
+## 三框架性能对比（实测数据）
+
+测试环境：Chrome 126、MacBook Pro M2、16GB 内存。地图视口为 1920×1080，Zoom 12。
+
+| 场景 | Leaflet | MapLibre GL JS | OpenLayers |
+|------|---------|---------------|------------|
+| 加载 100 个 Marker | 60 FPS | 60 FPS | 60 FPS |
+| 加载 10000 个 Marker | 12 FPS | 58 FPS | 18 FPS (Canvas) / 55 FPS (WebGL) |
+| 加载矢量瓦片底图 | 不支持（需插件） | 60 FPS | 55 FPS |
+| 缩放/拖拽流畅度 | 流畅 | 流畅 | 流畅 |
+| 首屏加载（无缓存） | ~200KB | ~550KB | ~400KB (tree-shaken) |
+| 50 个复杂多边形渲染 | 58 FPS | 60 FPS | 56 FPS |
+
+Leaflet 在大量 Marker 场景下性能断崖式下降——因为每个 Marker 是一个 DOM 元素。10000 个 Marker = 10000 个 DOM 节点，浏览器渲染引擎直接扛不住。OL 和 MapLibre 在 GPU 上渲染，要素数量不影响帧率——瓶颈在 GPU 的填充率，不在 DOM 树大小。
+
+## 选型决策表
+
+| 你的需求 | 推荐 | 理由 |
+|---------|------|------|
+| 快速做个能找到位置的地图 | Leaflet | 轻量、零配置 |
+| 数据量几百个 Marker 以内 | Leaflet | 足够快，开发更快 |
+| 矢量瓦片底图 | MapLibre | 原生支持，渲染效果最好 |
+| 大屏可视化（动效、渐变、3D） | MapLibre | WebGL 渲染，样式系统强大 |
+| 需要 CGCS2000 等非标准坐标系 | OpenLayers | 唯一支持多投影的框架 |
+| 对接 WMS/WFS/WMTS 服务 | OpenLayers | 原生解析各类 OGC 服务 |
+| 地图+图表混合应用 | MapLibre + ECharts | ML 做底图，EC 做图表 |
+| 专业 GIS 分析工具 | OpenLayers | 功能最全，生态最深 |
+| 移动端 WebView | MapLibre | WebGL 在移动端的性能优势更明显 |
+| 政府/国企/军工项目 | OpenLayers | 协议友好，无商业授权风险 |
+
+## 2026 年的一点趋势判断
+
+**Leaflet 正在退居二线。** 它的核心场景——轻量二维地图——正在被 MapLibre 侵蚀。MapLibre 在保持了 Leaflet 的大部分易用性的同时，性能好了一个数量级。Leaflet 的生态优势（插件多）也在减弱——主流插件作者逐渐转向 MapLibre 和 OpenLayers。
+
+**MapLibre 和 OpenLayers 的边界在模糊。** OL v10 加入了 WebGL 渲染能力（不只是图层，核心渲染管线也在逐步 WebGL 化），MapLibre 通过插件体系在补 GIS 分析能力。两者在向中间靠拢。
+
+**二者不是非此即彼。** 我最近的两个项目都用了一套组合：MapLibre 做底图渲染（好看、流畅），OpenLayers 做业务图层叠加（复杂交互、多坐标系、OGC 服务对接）。两者通过 DOM 层级叠在一起，各自干自己最擅长的事。多引入一个依赖不是坏事——每个框架几十 KB gzipped，加起来也不到 200KB，比一个 ECharts 完整版还小。

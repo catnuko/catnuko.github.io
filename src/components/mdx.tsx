@@ -1,5 +1,6 @@
 import { MDXRemote, MDXRemoteProps } from "next-mdx-remote/rsc";
 import React, { ReactNode } from "react";
+import remarkGfm from "remark-gfm";
 import { slugify as transliterate } from "transliteration";
 
 import {
@@ -209,5 +210,5 @@ type CustomMDXProps = MDXRemoteProps & {
 };
 
 export function CustomMDX(props: CustomMDXProps) {
-  return <MDXRemote options={{ blockJS: false }} {...props} components={{ ...components, ...(props.components || {}) }} />;
+  return <MDXRemote options={{ blockJS: false, mdxOptions: { remarkPlugins: [remarkGfm] } }} {...props} components={{ ...components, ...(props.components || {}) }} />;
 }

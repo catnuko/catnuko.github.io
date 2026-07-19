@@ -1,0 +1,236 @@
+---
+title: "用 D3.js 手写一个地图投影，直观理解墨卡托变形"
+summary: "每次讲到墨卡托投影，大部分教程都会甩出那张经典对比图：格陵兰岛在地图上跟非洲差不多大。大家都知道这是投影引起的变形，但变形到底是怎么发生的，从经纬度到屏幕像素中间经历了什么——很少有文章认真讲这件事。"
+publishedAt: "2021-05-08"
+tag: "WebGIS"
+---
+
+每次讲到墨卡托投影，大部分教程都会甩出那张经典对比图：格陵兰岛在地图上跟非洲差不多大。大家都知道这是投影引起的变形，但变形到底是怎么发生的，从经纬度到屏幕像素中间经历了什么——很少有文章认真讲这件事。
+
+这篇文章我带你用 D3.js 从零写一个交互式的地图投影可视化。不需要 TopoJSON，不需要底图，就用最原始的经纬线网格，直观地看到每种投影是怎么把地球"压扁"的。
+
+## 投影就是个数学函数
+
+抛开所有 GIS 术语，**地图投影本质上就是一个函数**：
+
+```
+f(lng, lat) → (x, y)
+```
+
+输入：地球上一点的经纬度
+输出：屏幕上一点的像素坐标
+
+各种投影的区别，就是这个函数怎么写。等距圆柱投影的函数最简单：
+
+```
+x = lng
+y = lat
+```
+
+直接把经纬度当坐标用。画出来就是一张方方正正的世界地图，经线纬线都是直线，但两极被严重压扁。
+
+墨卡托投影的函数稍微复杂一点：
+
+```
+x = lng
+y = ln(tan(π/4 + lat/2))
+```
+
+纬度经过了一个非线性变换，导致高纬度地区的 y 坐标被拉得特别大。这就是格陵兰岛看起来那么大的原因——它纬度很高，在墨卡托投影的 y 方向上被撑大了。
+
+## 搭个基础框架
+
+先用 D3.js 搭一个画布，画等距圆柱投影作为基准：
+
+```html
+<!DOCTYPE html>
+<html>
+<head>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <style>
+        svg { border: 1px solid #ccc; background: #fafafa; }
+        .graticule { fill: none; stroke: #ddd; stroke-width: 0.5; }
+        .coastline { fill: #e8e8e8; stroke: #999; stroke-width: 0.5; }
+    </style>
+</head>
+<body>
+    <div id="chart"></div>
+    <script>
+        const width = 900;
+        const height = 500;
+
+        const svg = d3.select('#chart')
+            .append('svg')
+            .attr('width', width)
+            .attr('height', height);
+    </script>
+</body>
+</html>
+```
+
+## 画经纬线网格
+
+每个投影下，经纬线网格的形态都不一样。在等距圆柱投影下，经纬线是方正的网格；在墨卡托投影下，纬线间距从赤道向两极逐渐拉大。画网格能最直观地看到每种投影的变形特征。
+
+用 D3 的 `geoGraticule` 生成经纬线：
+
+```javascript
+// 每隔 15 度画一条经线，每隔 10 度画一条纬线
+const graticule = d3.geoGraticule()
+    .step([15, 10]);
+
+svg.append('path')
+    .datum(graticule)
+    .attr('d', d3.geoPath(projection))
+    .attr('class', 'graticule');
+```
+
+D3 的 `geoGraticule` 自动生成从 -180° 到 180°、-90° 到 90° 的经纬线网格。配合 `geoPath(projection)`，每个经纬线交叉点都会经过投影函数转换，自动呈现出当前投影的网格形态。
+
+## 三种投影直观对比
+
+我们把等距圆柱、墨卡托、正交三种投影放在一起，各自画上经纬线网格。你会立刻看到它们的差异。
+
+**等距圆柱投影（Equirectangular）**：
+
+```javascript
+const equirectangular = d3.geoEquirectangular()
+    .translate([width / 2, height / 2])
+    .scale(width / (2 * Math.PI));
+```
+
+这是最简单的投影——经线纬线都是等间距的平行直线，整个世界是一个完美的矩形。赤道没有变形，越往两极越扁。它的好处是公式简单、计算快，劣势是面积和形状在高纬度严重失真。
+
+**墨卡托投影（Mercator）**：
+
+```javascript
+const mercator = d3.geoMercator()
+    .translate([width / 2, height / 2])
+    .scale(width / (2 * Math.PI));
+```
+
+经纬线仍然是直线网格，但纬线间距不均匀——赤道附近最窄，越往两极越宽。在 60° 纬度附近，y 方向已经拉伸到了赤道的两倍。这就是为什么格陵兰岛（大部分在 60°N 以上）画出来比实际面积大了好几倍。
+
+一个细节：墨卡托投影在 85° 以上会趋向无穷大（因为 tan(π/4 + 85°/2) → ∞），所以大多数实现都会裁掉 85° 以上。你画墨卡托地图，永远看不到南北极点——它们被"拉到了无穷远"。
+
+**正交投影（Orthographic）**：
+
+```javascript
+const orthographic = d3.geoOrthographic()
+    .translate([width / 2, height / 2])
+    .scale(250)
+    .rotate([-100, -30]);  // 旋转到能看到中国的角度
+```
+
+正交投影模拟的是从太空中看地球。经纬线变成了弯曲的弧线，越靠近边缘越密集。地球看起来是一个圆球，非常直观。它牺牲了面积和形状精度，换来了视觉上的逼真感。
+
+正交投影还能旋转——`rotate([lng, lat])` 可以让你从不同角度"看"地球。这在做一个"从太空俯瞰中国"的可视化页面时非常有用。
+
+## 可视化网格面积变形
+
+光看网格形状还不够直观。我们来做一个更暴力的实验：在地球上均匀撒上 500 个等面积的圆，然后分别用不同投影画出来，看看这些圆被怎么扭曲了。
+
+```javascript
+// 在地球上均匀采样
+function sampleEarthPoints(n) {
+    const points = [];
+    for (let i = 0; i < n; i++) {
+        // 用球面均匀采样
+        const z = 1 - 2 * (i + 0.5) / n;
+        const radius = Math.sqrt(1 - z * z);
+        const theta = Math.PI * (1 + Math.sqrt(5)) * i;
+        const lat = Math.asin(z) * 180 / Math.PI;
+        const lng = (Math.atan2(Math.sin(theta), Math.cos(theta)) * 180 / Math.PI);
+        points.push([lng, lat]);
+    }
+    return points;
+}
+
+// 画采样点
+const samples = sampleEarthPoints(500);
+
+const sampleCircles = {
+    type: 'FeatureCollection',
+    features: samples.map(([lng, lat]) => ({
+        type: 'Feature',
+        geometry: {
+            type: 'Point',
+            coordinates: [lng, lat]
+        },
+        properties: {
+            // 每个点代表一个圆形区域（用 D3 geoCircle 生成）
+        }
+    }))
+};
+```
+
+这个实验如果用等距圆柱投影画这 500 个均匀分布的点——靠近赤道的点和两极的点的像素间距一样大。但实际上，两极的点在地球上对应的真实面积比赤道上的点小得多。投影把两极"撑开"了。
+
+如果用墨卡托投影画——两极的点像素间距被拉得很大。越接近两极，点看起来越稀疏，但实际上它们在球面上是均匀分布的。
+
+这就是投影变形的本质：**投影函数在某个方向上的导数不等于 1，意味着该方向的长度被拉伸或压缩了**。面积变形 = x 方向拉伸 × y 方向拉伸。当面积变形 ≠ 1 时，你的地图就在"骗人"。
+
+## Tissot 指示线
+
+有个更专业的可视化工具叫 Tissot 指示线（Tissot's Indicatrix）。它的做法是在地图上均匀分布的采样点处画小圆，看这些圆被投影扭曲成了什么形状。
+
+正圆 → 椭圆，说明该点有角度变形。
+圆面积变了 → 说明该点有面积变形。
+圆还是圆，面积没变 → 该点无变形（等距圆柱投影只有赤道满足，墨卡托投影只有赤道附近满足）。
+
+D3 的 `geoCircle` 可以用来生成 Tissot 指示线：
+
+```javascript
+// 在赤道上的一个点画一个小圆
+const circle = d3.geoCircle()
+    .center([0, 0])
+    .radius(5);  // 5 度半径
+
+svg.append('path')
+    .datum(circle())
+    .attr('d', d3.geoPath(projection))
+    .attr('fill', 'rgba(255,0,0,0.3)')
+    .attr('stroke', 'red');
+```
+
+在等距圆柱投影下，赤道的 Tissot 指示线是正圆——无变形。60°N 的 Tissot 指示线变成了一个横向椭圆——说明 y 方向被压缩了。
+
+在墨卡托投影下，恰好反过来：赤道是正圆，60°N 变成了纵向椭圆——y 方向被拉伸。面积严重膨胀。
+
+把 Tissot 指示线布满全球，你会看到每种投影的变形分布规律一目了然。
+
+## D3 支持的投影一览
+
+D3 内置了大概 20 种投影，这里列出最常用的几种及它们的特点：
+
+| 投影 | D3 函数 | 特点 | 适用场景 |
+|------|---------|------|---------|
+| 等距圆柱 | `geoEquirectangular` | 经纬度即坐标，简单 | 数据可视化基准 |
+| 墨卡托 | `geoMercator` | 方向保形，高纬面积膨胀 | 在线地图底图 |
+| 正交 | `geoOrthographic` | 球形外观，可旋转 | 地球仪效果 |
+| 等面积方位 | `geoAzimuthalEqualArea` | 面积不变，形状变形 | 全球统计专题图 |
+| 圆锥等距 | `geoConicEquidistant` | 中纬度区域变形小 | 中国/美国全国地图 |
+| 阿尔伯斯 | `geoAlbers` | 等面积圆锥投影 | 美国人口普查局专用 |
+| 自然地球 | `geoNaturalEarth1` | 折中方案，视觉舒适 | 世界地图展示 |
+| 罗宾森 | `geoRobinson` | 折中，国家地理常用 | 世界地图展示 |
+
+中国地图一般用阿尔伯斯等面积圆锥投影或兰伯特投影。D3 提供了 `geoAlbers`，但默认参数是为美国优化的。给中国用需要调整：
+
+```javascript
+const chinaProjection = d3.geoAlbers()
+    .center([104, 35])
+    .rotate([0, 0])
+    .parallels([25, 47])
+    .translate([width / 2, height / 2])
+    .scale(600);
+```
+
+`.parallels([25, 47])` 设定了两条标准纬线——在这两条纬线上投影变形为零。中国的纬度跨度大约是 18°N 到 54°N，25°N 和 47°N 大约把中国疆域均匀分成三段，能让整体变形最小。
+
+## 最后的思考
+
+理解了投影的数学本质，你就会明白为什么 Web 地图清一色用墨卡托——不是因为它最准确，恰恰相反，它面积变形很大，但它在局部保持了形状（保形），而且公式简单、计算快、全球无缝。
+
+而当你做数据可视化——比如画全球气温分布图——正确的选择应该是等面积投影（如 Natural Earth 或 Robinson），因为每个国家的颜色代表的温度值不该因投影变形而失真。
+
+工具不会替你选投影，你得知道自己要展示什么，然后选对工具。D3 给了你全套投影方法，剩下的就是理解和判断了。

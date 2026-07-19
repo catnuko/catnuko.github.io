@@ -1,0 +1,215 @@
+---
+title: "Cesium 自定义 Shader 实现动态热力波纹效果"
+summary: "去年有个项目要做园区能耗监控，甲方提了个需求：建筑模型上要有动态的热力波纹，根据实时能耗数据从建筑中心向外扩散，能耗越高波纹越红、越密。"
+publishedAt: "2022-07-15"
+tag: "WebGIS"
+---
+
+去年有个项目要做园区能耗监控，甲方提了个需求：建筑模型上要有动态的热力波纹，根据实时能耗数据从建筑中心向外扩散，能耗越高波纹越红、越密。
+
+Cesium 原生的 Entity 和 Material 做不了这个效果。翻了半天文档，发现 Cesium 1.87 之后新增了 `CustomShader` API，可以直接对 3D Tiles 的片元着色器动手脚。
+
+这篇文章记录我从零实现这个效果的过程。
+
+## 先理解 Cesium 的渲染流水线
+
+在写代码之前，得先搞清楚 Cesium 是怎么渲染一个 3D Tiles 建筑的。
+
+Cesium 的渲染管线大致是这样的：
+
+1. JS 层准备好顶点数据（坐标、法线、纹理坐标）和统一变量（MVP 矩阵、光照参数等）
+2. 提交给 WebGL 渲染管线
+3. 顶点着色器处理每个顶点的坐标变换
+4. 片元着色器处理每个像素的颜色
+
+`CustomShader` 的作用就是让你在步骤 3 和 4 之间插入自己的 GLSL 代码。你可以修改顶点位置（做顶点动画），也可以修改片元颜色（做自定义着色）。
+
+Cesium 的 `CustomShader` 支持以下几种代码注入点：
+
+| 注入点 | 作用域 | 典型用途 |
+|--------|--------|---------|
+| `vertexShaderText` | 顶点着色器 | 顶点偏移、顶点动画 |
+| `fragmentShaderText` | 片元着色器 | 自定义颜色、纹理混合 |
+| `varyings` | 顶点→片元传递 | 传递自定义变量 |
+| `uniforms` | JS→Shader 传递 | 传入动态参数 |
+
+## 从最简单的开始：让建筑变色
+
+先做最简单的——根据一个 JS 传入的 `uniform` 值动态调整建筑颜色。
+
+```javascript
+const customShader = new Cesium.CustomShader({
+    uniforms: {
+        u_color: {
+            type: Cesium.UniformType.VEC3,
+            value: new Cesium.Cartesian3(1.0, 0.0, 0.0) // 红色
+        }
+    },
+    fragmentShaderText: `
+        void fragmentMain(FragmentInput fsInput, inout czm_modelMaterial material) {
+            // 用 uniform 颜色覆盖漫反射
+            material.diffuse = u_color;
+            material.alpha = 0.8;
+        }
+    `
+});
+
+tileset.customShader = customShader;
+```
+
+几个关键点：
+
+- `FragmentInput` 是 Cesium 预定义的片元输入结构，包含了法线、纹理坐标、世界坐标等
+- `czm_modelMaterial` 是 PBR 材质结构，有 `diffuse`、`specular`、`roughness`、`normal`、`alpha` 等属性。你需要设置哪些属性取决于你想要的效果
+- `fragmentMain` 是入口函数名，Cesium 内部会在片元着色器的正确位置调用它
+
+如果想让颜色随时间变化，加一个带 `u_time` 的 uniform 就行：
+
+```javascript
+const startTime = Date.now();
+
+const customShader = new Cesium.CustomShader({
+    uniforms: {
+        u_time: {
+            type: Cesium.UniformType.FLOAT,
+            value: 0
+        }
+    },
+    fragmentShaderText: `
+        void fragmentMain(FragmentInput fsInput, inout czm_modelMaterial material) {
+            // 随时间在红蓝之间切换
+            float r = sin(u_time * 2.0) * 0.5 + 0.5;
+            float b = cos(u_time * 2.0) * 0.5 + 0.5;
+            material.diffuse = vec3(r, 0.0, b);
+            material.alpha = 0.8;
+        }
+    `
+});
+
+// 每帧更新 uniform
+viewer.scene.preRender.addEventListener(() => {
+    customShader.setUniform('u_time', (Date.now() - startTime) / 1000.0);
+});
+```
+
+注意 `preRender` 是在每帧渲染之前触发的，用它更新 uniform 可以保证 Shader 拿到的是最新值。
+
+## 核心效果：动态热力波纹
+
+现在开始做正题——波纹扩散。波纹的本质是在片元着色器里计算当前像素到某个中心的距离，然后用正弦函数控制亮暗，模拟波纹的峰谷。
+
+**第一步：从 JS 传入波纹参数**
+
+```javascript
+const tileset = await Cesium.Cesium3DTileset.fromUrl('/tiles/tileset.json');
+
+const customShader = new Cesium.CustomShader({
+    uniforms: {
+        u_energy: {
+            type: Cesium.UniformType.FLOAT,
+            value: 0.5  // 能耗值，0-1，越接近 1 越红越密
+        },
+        u_time: {
+            type: Cesium.UniformType.FLOAT,
+            value: 0
+        },
+        u_center: {
+            type: Cesium.UniformType.VEC3,
+            value: new Cesium.Cartesian3() // 波纹中心的世界坐标
+        }
+    },
+    fragmentShaderText: `
+        void fragmentMain(FragmentInput fsInput, inout czm_modelMaterial material) {
+            // 计算当前片元到中心的距离
+            vec3 worldPos = fsInput.positionWC;
+            float dist = length(worldPos - u_center);
+
+            // 波纹：用 sin 函数创建明暗相间的环
+            // u_energy 影响波纹密度——能耗越高波纹越密
+            float waveFrequency = 5.0 + u_energy * 15.0;
+            float wave = sin(dist * waveFrequency - u_time * 3.0);
+
+            // 衰减：距离越远波纹越弱
+            float falloff = 1.0 - smoothstep(0.0, 50.0, dist);
+
+            // 混合颜色：低能耗绿色，高能耗红色
+            vec3 coolColor = vec3(0.2, 0.8, 0.2);
+            vec3 hotColor = vec3(1.0, 0.1, 0.1);
+            vec3 waveColor = mix(coolColor, hotColor, u_energy);
+
+            // 最终颜色：波纹亮的地方用波纹颜色，暗的地方用原始材质
+            float intensity = (wave * 0.5 + 0.5) * falloff;
+            material.diffuse = mix(material.diffuse, waveColor, intensity * 0.6);
+        }
+    `
+});
+
+tileset.customShader = customShader;
+```
+
+这段 Shader 里几个值得展开的点：
+
+`fsInput.positionWC` 是当前片元在世界坐标系下的位置。Cesium 的 `FragmentInput` 帮你算好了，不需要手动做矩阵变换。
+
+`dist` 是从当前片元到波纹中心的欧氏距离。单位是米——因为 Cesium 的世界坐标单位就是米。这意味着 `50.0` 就是 50 米，直观好调试。
+
+`smoothstep(0.0, 50.0, dist)` 创建了一个平滑的过渡：dist < 0 时返回 0，dist > 50 时返回 1，中间线性插值。`1.0 - smoothstep(...)` 反过来——越近越亮，50 米外波纹完全消失。这个 50 米是可调参数，取决于你的建筑尺度。如果园区很大，可以调到 100 米甚至更大。
+
+`mix(material.diffuse, waveColor, intensity * 0.6)` 是关键的颜色混合：波纹颜色和建筑原始材质按比例混合。0.6 的系数意味着波纹最大只覆盖 60% 的颜色，给原始材质留了 40%——这样建筑的纹理和细节不会完全被波纹盖掉。
+
+**第二步：每帧更新中心点位置和时间**
+
+```javascript
+const startTime = performance.now();
+
+viewer.scene.preRender.addEventListener(() => {
+    const elapsed = (performance.now() - startTime) / 1000.0;
+    customShader.setUniform('u_time', elapsed);
+
+    // 从某个数据源获取当前能耗值（模拟）
+    const energy = fetchCurrentEnergy();
+    customShader.setUniform('u_energy', energy);
+
+    // 如果中心点需要变动（比如多个建筑轮播），在这里更新
+    const center = Cesium.Cartesian3.fromDegrees(116.397, 39.908, 50);
+    customShader.setUniform('u_center', center);
+});
+```
+
+**第三步（可选的升级）：多层波纹叠加**
+
+单层波纹看起来比较单调。多叠加几层可以让效果更丰富：
+
+```glsl
+// 三层不同频率和速度的波纹叠加
+float wave1 = sin(dist * 5.0 - u_time * 3.0);
+float wave2 = sin(dist * 8.0 - u_time * 2.0) * 0.5;
+float wave3 = sin(dist * 12.0 - u_time * 4.0) * 0.3;
+float wave = wave1 + wave2 + wave3;
+```
+
+三层叠加后，波纹会显得更有层次，不会那么"干净"和计算机味。
+
+## 性能注意事项
+
+在 Shader 里写三角函数和距离计算，性能开销几乎可以忽略。GPU 的 ALU 算力远超这些操作的需求。
+
+真正需要关注的是 Draw Call。如果你有 1000 个独立建筑各自用不同的 `CustomShader`，那就是 1000 个 Draw Call，帧率会崩。Cesium 3D Tiles 的批处理机制可以把相同材质的瓦片合并成一个 Draw Call，但如果每个建筑的波纹中心点不同（`u_center` 不一样），就无法合并。
+
+解决办法：尽量让同类型的建筑共用同一个 CustomShader，差异通过其他手段（如 `featureId` 或批次纹理）传入。如果每个建筑的波纹必须独立控制——那就要权衡效果和性能了。
+
+对于园区级别的项目（几十栋建筑），这个问题不存在。对于城市级别（几千栋），就需要在效果和性能之间做取舍。
+
+## 一个踩过的坑
+
+Cesium 的 `positionWC` 是 World Coordinate，也就是 ECEF 地心坐标系，单位米，原点在地心。坐标值大概在 10^6 量级。而 GLSL 中 `float` 类型是 32 位的，10^6 级别的数值进行三角函数运算时可能产生精度问题——sin 函数的周期是 2π，10^6 除以 2π 大约是 16 万，这意味着你只剩 16 万/2^23 ≈ 0.02 的分数精度，波纹可能出现肉眼可见的抖动。
+
+解决办法是在传入中心点之前做偏移——在 JS 层把中心点和所有片元位置都减去一个基准点（比如 tileset 的中心），传入 Shader 的是相对位置而不是绝对位置。相对位置的量级通常在 10^2 到 10^4，32 位 float 完全够用。
+
+```javascript
+const origin = tileset.boundingSphere.center; // 瓦片集中心
+const relativeCenter = Cesium.Cartesian3.subtract(center, origin, new Cesium.Cartesian3());
+customShader.setUniform('u_center', relativeCenter);
+```
+
+对应地，Shader 里用 `fsInput.positionWC - u_origin` 代替直接的 `fsInput.positionWC`。Cesium 的 `FragmentInput` 没有直接提供相对坐标，但你可以再传一个 `u_origin` uniform 进去自己减。

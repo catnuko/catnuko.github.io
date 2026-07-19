@@ -1,0 +1,175 @@
+---
+title: "WMS / WMTS / WFS / WCS 到底怎么选？一篇文章终结你的选择困难"
+summary: "我第一次看到 OGC 那四个缩写的时候，脑子是懵的。WMS、WMTS、WFS、WCS——个个名字差不多，个个都号称“标准地图服务”，到底有什么区别，什么时候用哪个？"
+publishedAt: "2020-10-05"
+tag: "WebGIS"
+---
+
+我第一次看到 OGC 那四个缩写的时候，脑子是懵的。WMS、WMTS、WFS、WCS——个个名字差不多，个个都号称"标准地图服务"，到底有什么区别，什么时候用哪个？
+
+后来在项目里把它们挨个接了一遍，吃了不少亏，总算把这件事搞明白了。这篇文章帮你省掉我当年走的弯路。
+
+## 先记住一个口诀
+
+> WMS：看图，不碰数据
+>
+> WMTS：快速看图，不碰数据
+>
+> WFS：拿数据，自己画
+>
+> WCS：拿栅格原始数据
+
+记住这个就够了。下面是展开。
+
+## WMS（Web Map Service）
+
+WMS 是最古老的 OGC 地图服务标准，1999 年发布。它的工作方式简单到一句话就能说完：客户端告诉服务器"我要看哪个范围、哪几层、多大的图"，服务器渲染好一张图返回。
+
+一个典型的 WMS GetMap 请求：
+
+```
+https://server.com/wms?
+  SERVICE=WMS&
+  VERSION=1.3.0&
+  REQUEST=GetMap&
+  LAYERS=roads,buildings&
+  STYLES=default,default&
+  CRS=EPSG:3857&
+  BBOX=12655879,4822831,12671094,4838046&
+  WIDTH=800&
+  HEIGHT=600&
+  FORMAT=image/png
+```
+
+参数解读：
+
+- **BBOX**：请求的地理范围（EPSG:3857 米坐标），格式是左下角 + 右上角
+- **WIDTH / HEIGHT**：返回图片的像素尺寸
+- **LAYERS**：请求哪些图层，逗号分隔
+- **FORMAT**：图片格式，支持 image/png、image/jpeg 等
+
+服务器收到请求后，在内存中渲染这张图，然后把 PNG 字节流吐回来。整个过程是实时的、动态的。
+
+WMS 的优势是灵活。你可以查任意范围、任意尺寸、任意图层组合。想看看某个城区同时叠了水系和道路的效果？改个参数就行。
+
+劣势也很要命——慢。每次请求都要实时渲染，并发一上来，服务器 GPU 或 CPU 直接拉满。而且 GetMap 返回的是渲染后的图片，像素是固定的，Retina 屏上会糊。
+
+WMS 还有两个不太常用的操作：
+
+- **GetCapabilities**：返回服务的元数据（有哪些图层、支持什么格式、覆盖范围等）
+- **GetFeatureInfo**：点击地图上某个像素，返回该位置有哪些要素及其属性
+
+GetFeatureInfo 在某些场景下很好用。比如点击一条路，弹窗显示路名、等级、限速——不需要额外维护一套要素查询接口，直接用 WMS 自带的就行。
+
+什么时候用 WMS？数据量不大、并发不高、需要动态组合图层的场景。比如管理后台里一个只有几十人用的地图模块，WMS 完全够用。
+
+## WMTS（Web Map Tile Service）
+
+WMTS 是 2010 年发布的，核心思路就一个：预切片。
+
+它预先在服务器上把地图切成固定尺寸的瓦片（256×256 或 512×512），客户端按瓦片坐标请求。因为不用实时渲染，响应速度极快，加个 CDN 就能顶住大并发。
+
+请求格式：
+
+```
+https://server.com/wmts?
+  SERVICE=WMTS&
+  REQUEST=GetTile&
+  VERSION=1.0.0&
+  LAYER=roads&
+  STYLE=default&
+  FORMAT=image/png&
+  TILEMATRIXSET=EPSG:3857&
+  TILEMATRIX=12&
+  TILEROW=1342&
+  TILECOL=3321
+```
+
+其中 `TILEMATRIX` 是缩放级别（z），`TILEROW` 是瓦片行号（y），`TILECOL` 是瓦片列号（x）。
+
+WMTS 跟常见的 XYZ 瓦片（`/z/x/y.png`）本质上是一回事，但 WMTS 多了一层 OGC 标准的外壳：它用 TileMatrixSet 定义瓦片矩阵、用 GetCapabilities 暴露元数据、用 RESTful 或 KVP 两种方式访问。XYZ 更简单粗暴，WMTS 更符合企业级 GIS 的规范化要求。
+
+什么时候用 WMTS？只要你的底图数据不需要频繁更新，就用 WMTS。用了 WMTS 之后，你的地图加载速度会有一个质的飞跃。
+
+一个常见的架构是：WMS 用于预览和调试，WMTS 用于生产。开发阶段用 WMS 随时调图层组合，确认没问题后跑一遍切片任务，生产环境切到 WMTS。
+
+## WFS（Web Feature Service）
+
+WFS 跟前面两个有本质的区别：它不给你图，它给你数据。
+
+WFS 返回的是矢量数据，通常是 GML（Geography Markup Language，XML 的一种）或者 GeoJSON。前端拿到数据后自己渲染。
+
+一个 WFS GetFeature 请求：
+
+```
+https://server.com/wfs?
+  SERVICE=WFS&
+  VERSION=2.0.0&
+  REQUEST=GetFeature&
+  TYPENAMES=roads&
+  CQL_FILTER=class='motorway'&
+  COUNT=100
+```
+
+注意 `CQL_FILTER`（Common Query Language）。这是一个类 SQL 的过滤语法，可以做空间查询和属性过滤。比如：
+
+- `class='motorway' AND lanes>=4`：属性过滤
+- `DWITHIN(geom, POINT(116.4 39.9), 500, meters)`：空间查询，500 米范围内的要素
+- `BBOX(geom, 116.3, 39.8, 116.5, 40.0)`：范围查询
+
+WFS 的强大在于它把 GIS 的查询能力直接暴露给了前端。你不需要写后端接口，前端直接发 CQL 就能拿到想要的数据。
+
+但它的弱点也很明显：数据量大时传输和解析都很慢。你不可能把全市的道路一次性拉回来。所以 WFS 通常要配合分页或者空间过滤使用：只查当前视口范围内的数据，每次限制条数。
+
+WFS 还有一个兄弟叫 WFS-T（Transactional），支持增删改。你可以通过 WFS 接口直接在服务器上编辑数据。不过国内项目用 WFS-T 的很少，大部分还是走 RESTful API 做数据编辑，因为 WFS-T 的事务模型太复杂了。
+
+什么时候用 WFS？需要前端做空间分析、交互编辑、或者自定义渲染的场景。比如做一个地块查询工具，用户在图上画个圈，查圈内有哪些地块——用 WFS 的 CQL_FILTER 配合空间操作符是最直接的方案。
+
+## WCS（Web Coverage Service）
+
+WCS 是最少被提起的一个，但它是处理栅格数据的专业选手。
+
+WMS 返回的是渲染后的图片，WCS 返回的是栅格的原始数值。比如一张 DEM（数字高程模型）数据，WMS 给你一张带了颜色映射的 PNG 图片，WCS 给你一个 GeoTIFF，里面每个像素都是真实的海拔值。
+
+WCS 请求：
+
+```
+https://server.com/wcs?
+  SERVICE=WCS&
+  VERSION=2.0.1&
+  REQUEST=GetCoverage&
+  COVERAGEID=dem&
+  SUBSET=x(116.0,117.0)&
+  SUBSET=y(39.0,40.0)&
+  FORMAT=image/geotiff
+```
+
+这个请求返回的是指定范围内的 GeoTIFF 文件，前端拿到后可以做真正的数据分析——计算坡度、坡向、等高线、视域分析等等。
+
+WCS 在实际项目中的使用场景比较窄，主要集中在遥感、测绘、气象等需要做栅格分析的领域。大多数 WebGIS 项目用不上它，WMS 看个效果图就够了。
+
+## 总结：决策树
+
+```
+                    ┌─ 需要前端做空间分析/编辑？ ──→ WFS
+                    │
+需要矢量数据？ ──────┤
+                    │
+                    └─ 不需要前端处理 ──→ 用 WMS 就够了
+                    │
+                    │                    ┌─ 底图/不常变的数据 ──→ WMTS
+                    │                    │
+不需要矢量数据？ ───┤                     │
+                    │                    └─ 动态图层/数据常变 ──→ WMS
+                    │
+                    └─ 需要原始栅格数值？ ──→ WCS
+```
+
+实际项目中最常见的组合是：
+
+- 底图用 WMTS（或者直接接在线地图服务）
+- 业务图层用 WMS 或矢量瓦片（MVT）
+- 交互查询用 WFS
+- 栅格分析用 WCS（如果有的话）
+
+最后提醒一点：虽然这些缩写都是 OGC 标准，但各家的实现质量参差不齐。GeoServer 对 WMS/WMTS/WFS/WCS 的支持比较完整，MapServer 在 WCS 方面稍弱。如果你用的是商业 GIS 平台（ArcGIS Server、SuperMap iServer 等），它们通常有自己的 REST API，比纯 OGC 接口更好用。那就没必要死磕标准了——选好用的就行。

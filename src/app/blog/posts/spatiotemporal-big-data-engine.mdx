@@ -1,0 +1,195 @@
+---
+title: "Apache Sedona / GeoMesa 在 Web 端的时空查询与实时渲染"
+summary: "去年在一个智慧交通项目里接手了一个经典问题：2000 万辆网约车的 GPS 轨迹数据，每天增量约 500GB，要求前端能在地图上实时查看任意区域、任意时间段的车辆轨迹热力图，而且查询要在 3 秒内返回。"
+publishedAt: "2024-11-28"
+tag: "WebGIS"
+---
+
+去年在一个智慧交通项目里接手了一个经典问题：2000 万辆网约车的 GPS 轨迹数据，每天增量约 500GB，要求前端能在地图上实时查看任意区域、任意时间段的车辆轨迹热力图，而且查询要在 3 秒内返回。
+
+如果你用 PostGIS + GeoJSON 来做，这会是一个灾难。一条简单的"过去一小时内，北京国贸半径 2 公里的车辆数"查询，PostGIS 要跑几十秒——不是 PostGIS 不行，是单机数据库在 TB 级时空数据面前就是不对等的战斗。
+
+必须上分布式。这篇文章梳理 Apache Sedona 和 GeoMesa 两个主流时空大数据引擎在 Web 端的应用方案。
+
+## 为什么 PostGIS 搞不定大规模时空数据
+
+PostGIS 在处理 GB 级别的空间数据时表现很好——空间索引（GiST/SP-GiST）、丰富的空间函数、成熟的生态。但数据量到了 TB 级别，单机架构的瓶颈就暴露了：
+
+1. **存储瓶颈**：单机硬盘就那么大。一台 2TB SSD 的服务器，一天 500GB 增量，四天就满
+2. **计算瓶颈**：时空查询（尤其是带时间窗口的聚合查询）是 CPU 密集型的，单机 CPU 核心数有限，并行度不够
+3. **I/O 瓶颈**：全表扫描时磁盘 I/O 成为瓶颈，SSD 带宽 500MB/s 听起来很快，500GB 全扫一遍也要 16 分钟
+
+PostGIS 正确的做法是做分区表 + 时间分片 + 定期归档旧数据。但这只是把问题推迟了——数据量继续增长，分区表最终也会触及单机天花板。
+
+分布式方案的优势在于每个维度都可以水平扩展。加机器就能加存储、加计算、加 I/O 带宽。
+
+## Apache Sedona：Spark 上的 GIS
+
+Apache Sedona（原名 GeoSpark）是在 Spark 上运行的空间计算引擎。它提供了分布式空间 RDD/DataFrame，支持标准 SQL 语法 + 空间扩展。
+
+核心能力：
+
+```sql
+-- 创建空间表
+CREATE TABLE IF NOT EXISTS gps_trajectories (
+    vehicle_id STRING,
+    geom GEOMETRY,
+    ts TIMESTAMP,
+    speed DOUBLE
+) USING sedona
+OPTIONS (spatialIndex 'rtree');
+
+-- 时空范围查询
+SELECT vehicle_id, geom, ts
+FROM gps_trajectories
+WHERE ST_Contains(
+    ST_GeomFromWKT('POLYGON((116.3 39.8, 116.5 39.8, 116.5 40.0, 116.3 40.0, 116.3 39.8))'),
+    geom
+)
+AND ts BETWEEN '2026-07-19 08:00:00' AND '2026-07-19 09:00:00';
+
+-- 空间聚合（热力图）
+SELECT
+    ST_GeomFromWKT(geom_wkt) AS grid_cell,
+    COUNT(*) AS vehicle_count
+FROM (
+    SELECT ST_SnapToGrid(geom, 0.001, 0.001) AS geom_wkt
+    FROM gps_trajectories
+    WHERE ts >= NOW() - INTERVAL 1 HOUR
+)
+GROUP BY geom_wkt;
+```
+
+Sedona 会在 Spark 集群上并行执行这个查询——每个 Executor 扫描它所负责的数据分片，结果在 Driver 端汇总。一台 3 节点 Spark 集群（每节点 16 核 64GB），对 500GB 数据进行一次时空范围查询，实测约 2-4 秒，完全满足 3 秒的需求。
+
+前端对接方案：后端起一个 HTTP 服务，接收前端传来的空间范围（BoundingBox）和时间范围参数，拼成 SQL 提交给 Sedona，返回 GeoJSON。前端跟普通 WebGIS 一样消费 GeoJSON 就行。
+
+一个细节：返回 GeoJSON 时要控制数据量。一次查询可能返回几十万个点，全部传前端既慢又没必要——地图上根本显示不了这么多。在 SQL 层做聚合或采样：
+
+```sql
+-- 随机采样 5%
+SELECT * FROM (
+    SELECT *, RAND() AS r
+    FROM gps_trajectories
+    WHERE ...
+)
+WHERE r < 0.05;
+```
+
+或者按网格聚合代替返回原始点：
+
+```sql
+SELECT
+    ST_AsText(ST_Centroid(grid.geom)) AS center,
+    grid.count
+FROM (
+    SELECT
+        ST_SnapToGrid(geom, 0.005) AS cell,
+        COUNT(*) AS count
+    FROM gps_trajectories
+    WHERE ts >= NOW() - INTERVAL 1 HOUR
+    GROUP BY cell
+) grid;
+```
+
+热力图不传原始点，传网格的中心点和计数，数据量从几十万个点缩减到几百个网格。
+
+## GeoMesa：基于 Accumulo/HBase/Kafka 的时序空间引擎
+
+GeoMesa 的思路跟 Sedona 不同。Sedona 是批处理引擎——一次查询扫描全量数据。GeoMesa 是索引优先——先建时空索引，查询时走索引，不扫全表。
+
+GeoMesa 支持多种分布式存储后端，最常用的是 Accumulo 和 HBase：
+
+```
+数据写入 → GeoMesa → Accumulo/HBase（自动建时空索引） → 前端查询
+```
+
+索引的核心是 GeoHash + 时间分桶。GeoMesa 把时空数据按 GeoHash 编码 + 时间间隔分桶存储，查询时只访问相关的桶：
+
+```scala
+// GeoMesa 查询
+val query = new Query("gps_trajectories", filter)
+query.setFilter(
+    CQL.toFilter("BBOX(geom, 116.3, 39.8, 116.5, 40.0) " +
+                  "AND ts BETWEEN '2026-07-19T08:00:00' AND '2026-07-19T09:00:00'")
+)
+
+val results = dataStore.getFeatureReader(query, Transaction.AUTO_COMMIT)
+```
+
+GeoMesa 的优势在于查询快且不需要 Spark 集群——它是一个嵌入式 Java 库，可以直接跑在 Spring Boot 应用里。但代价是数据写入速度不如 Sedona（因为要维护索引），适合"写入不算特别快、查询非常频繁"的场景。
+
+## Web 端集成：从查询到渲染的完整链路
+
+无论后端用 Sedona 还是 GeoMesa，前端集成链路是一样的：
+
+```
+前端（绘制 BoundingBox / 选时间） → HTTP API → 后端 → 时空引擎 → 返回 GeoJSON → 前端渲染
+```
+
+后端 API 设计：
+
+```
+GET /api/query/spatial-range
+    ?west=116.3&south=39.8&east=116.5&north=40.0
+    &start=2026-07-19T08:00:00
+    &end=2026-07-19T09:00:00
+    &aggregate=heatmap
+    &gridSize=0.005
+```
+
+参数设计原则：
+- `aggregate=heatmap` 时返回网格聚合结果，`aggregate=raw` 时返回原始点（带采样限流）
+- `gridSize` 控制聚合粒度，跟地图缩放级别联动——zoom 小（范围大）时用大网格，zoom 大（范围小）时用小网格
+
+前端联动缩放级别：
+
+```javascript
+map.on('moveend', () => {
+    const zoom = map.getZoom();
+    const bounds = map.getBounds();
+
+    // zoom 级别映射到 gridSize
+    const gridSize = {
+        10: 0.01,
+        12: 0.005,
+        14: 0.002,
+        16: 0.001
+    }[zoom] || 0.005;
+
+    fetchHeatmap(bounds, gridSize);
+});
+```
+
+渲染用 Deck.gl 的 HeatmapLayer 或 ScreenGridLayer：
+
+```javascript
+new ScreenGridLayer({
+    id: 'traffic-heatmap',
+    data: gridData,
+    getPosition: d => d.center,
+    getWeight: d => d.count,
+    cellSizePixels: 30,
+    colorRange: [
+        [0, 0, 200, 50],
+        [0, 200, 0, 100],
+        [200, 200, 0, 150],
+        [200, 0, 0, 200]
+    ]
+});
+```
+
+## 选型建议
+
+| 场景 | 推荐 | 原因 |
+|------|------|------|
+| 已有 Spark 集群 | Sedona | 零额外运维成本，直接复用 Spark |
+| 纯 Java 栈，不想搭 Spark | GeoMesa | 嵌入式库，打 jar 就能跑 |
+| 数据量 TB 级、查询 QPS 高 | GeoMesa + HBase | 索引查询比全表扫描快 1-2 个数量级 |
+| 数据量 PB 级、查询偶尔跑 | Sedona + Parquet | 批处理天然适合大规模数据 |
+| 项目预算少 | Sedona standalone | 单机也能跑，数据量小时不需要集群 |
+| 实时流数据（Kafka） | GeoMesa Kafka | 支持 Kafka DataStore，数据即写即查 |
+
+如果你刚接触这个方向，最稳妥的路径是 Sedona standalone 模式——在一台机器上先跑起来，把 PostGIS 的查询改成 Sedona SQL，感受一下分布式查询的开发模式。等真正遇到单机瓶颈时再扩展到集群。
+
+一个容易被忽略但非常重要的点：不管你用哪个引擎，前端最终拿到的都是 GeoJSON。所以后端在输出时一定要控制返回数据的尺寸——10MB 的 GeoJSON 在浏览器里解析要好几秒，用户以为系统卡了，其实是在解析 JSON。必要时上二进制格式（FlatGeobuf 或自定义 protobuf），前端用 Web Worker 异步解析。

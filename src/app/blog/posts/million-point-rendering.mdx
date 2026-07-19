@@ -1,0 +1,276 @@
+---
+title: "前端百万级点渲染不卡顿的秘密：R-tree 与 GeoHash 浅析"
+summary: "去年接手一个 IoT 车辆监控项目，要求地图上同时展示全市 12 万辆在线车辆的实时位置，2 秒刷新一次。第一版直接 new 了 12 万个 Marker 怼上去，结果浏览器当场卡死，连 DevTools 都打不开。"
+publishedAt: "2021-01-20"
+tag: "WebGIS"
+---
+
+去年接手一个 IoT 车辆监控项目，要求地图上同时展示全市 12 万辆在线车辆的实时位置，2 秒刷新一次。第一版直接 new 了 12 万个 Marker 怼上去，结果浏览器当场卡死，连 DevTools 都打不开。
+
+那个下午我学会了第一个教训：浏览器不是 GIS 软件，你不能把桌面端 GIS 的思维直接搬过来。
+
+## 问题的本质
+
+12 万个 Marker 为什么会卡？我们拆开看。
+
+OpenLayers 每个 Marker 背后是一个 DOM 元素——或至少是一个 Canvas 绘制指令。12 万个绘制对象，每帧都要走一遍渲染管线：位置计算、矩阵变换、颜色填充、纹理采样。更致命的是，这 12 万个点里用户实际能看到的可能只有几百个——你的屏幕分辨率也就 1920×1080，剩下 11.9 万个点根本不在视口内，但它们照样在消耗 CPU 算空间变换、判断是否裁剪。
+
+所以优化的核心思路就两个：
+
+1. 不要渲染看不见的东西（视口裁剪）
+2. 不要把远处的点画得跟近处一样大（分层聚合）
+
+要实现这两点，你需要一个能快速回答"这个范围内有哪些点"的数据结构。这就是空间索引。
+
+## GeoHash
+
+GeoHash 是空间索引里最容易理解的一种。它的思路是把二维的经纬度编码成一维的字符串，相邻的位置有相同的字符串前缀。
+
+GeoHash 的原理是二分法。先看纬度，北半球标 1，南半球标 0；再看经度，东半球标 1，西半球标 0。然后对每个子区间再二分，不断细分。把生成的 01 序列按 Base32 编码，就得到了一串字符。
+
+比如北京天安门（116.397, 39.908）的 GeoHash 编码：
+
+- 精度 6 位：`wx4g0b`
+- 精度 7 位：`wx4g0bm`
+- 精度 8 位：`wx4g0bmk`
+
+精度与范围的大致对应关系：
+
+| GeoHash 长度 | 覆盖范围（约） |
+|-------------|---------------|
+| 5 | 4.9km × 4.9km |
+| 6 | 1.2km × 0.6km |
+| 7 | 153m × 153m |
+| 8 | 38m × 19m |
+| 9 | 4.8m × 4.8m |
+
+GeoHash 做视口裁剪非常直观。假设你的地图视口覆盖了 `wx4g0` 这个区域，你只需要查所有前缀为 `wx4g0` 的点。如果查询结果太少，就缩短前缀扩大范围；如果太多，就加长前缀缩小范围。
+
+用 JavaScript 实现一个简单的 GeoHash 编码：
+
+```javascript
+const BASE32 = '0123456789bcdefghjkmnpqrstuvwxyz';
+
+function encodeGeoHash(lat, lng, precision = 8) {
+    let latMin = -90, latMax = 90;
+    let lngMin = -180, lngMax = 180;
+    let hash = '';
+    let bit = 0;
+    let charIndex = 0;
+    let isEven = true;
+
+    while (hash.length < precision) {
+        if (isEven) {
+            const mid = (lngMin + lngMax) / 2;
+            if (lng > mid) {
+                charIndex = (charIndex << 1) | 1;
+                lngMin = mid;
+            } else {
+                charIndex = (charIndex << 1) | 0;
+                lngMax = mid;
+            }
+        } else {
+            const mid = (latMin + latMax) / 2;
+            if (lat > mid) {
+                charIndex = (charIndex << 1) | 1;
+                latMin = mid;
+            } else {
+                charIndex = (charIndex << 1) | 0;
+                latMax = mid;
+            }
+        }
+
+        bit++;
+        if (bit === 5) {
+            hash += BASE32[charIndex];
+            bit = 0;
+            charIndex = 0;
+        }
+        isEven = !isEven;
+    }
+
+    return hash;
+}
+```
+
+单纯用字符串前缀匹配做空间查询有一个明显的缺陷：边界问题。两个位置在物理上紧挨着，但因为正好跨在 GeoHash 格子的边界上，前缀完全不同。比如某个点在地图视口边缘的外侧，它的 GeoHash 前缀跟视口内的点完全不一样，但它其实离视口只有 5 米。
+
+解决办法是同时查询当前格子及周围 8 个邻居格子的 GeoHash。这样就能覆盖边界附近的点，代价是多查 8 条数据。
+
+## R-tree
+
+R-tree 比 GeoHash 更通用，也更复杂。它把空间对象用最小外接矩形（MBR，Minimum Bounding Rectangle）包裹，然后一层层地嵌套分组。每个内部节点存储的是子节点的 MBR 合集，叶子节点存储实际的空间对象。
+
+当你查询"这个视口内有哪些点"时，R-tree 从根节点开始往下走。如果当前节点的 MBR 跟视口没有交集，直接跳过整个子树。只有 MBR 跟视口相交的节点才会继续深入检查。这样能快速排除大量不相关的数据。
+
+在浏览器端，`rbush` 是目前最成熟的 JavaScript R-tree 实现。
+
+```javascript
+import RBush from 'rbush';
+
+// 初始化，参数是单个节点最多容纳的元素数（默认 9）
+const tree = new RBush(16);
+
+// 批量插入
+const items = points.map((p, i) => ({
+    minX: p.lng,
+    minY: p.lat,
+    maxX: p.lng,
+    maxY: p.lat,  // 点的话 min 和 max 相同
+    id: i
+}));
+
+tree.load(items);
+
+// 视口查询
+const viewport = {
+    minX: 116.3,
+    minY: 39.8,
+    maxX: 116.5,
+    maxY: 40.0
+};
+
+const visibleItems = tree.search(viewport);
+```
+
+rbush 的 `search` 返回的是跟查询矩形相交的所有元素。对于视口裁剪来说，这意味着你能在毫秒级拿到当前该渲染的点集。我用 12 万条数据实测，一次 viewport search 耗时约 2-5 毫秒，完全在可接受范围内。
+
+R-tree 相比 GeoHash 的优势在于查询精度：它做的是精确的矩形相交判断，不受网格边界影响。GeoHash 需要通过查周围 8 个邻居格子来弥补边界问题，而 R-tree 天然就没有这个问题。
+
+代价是插入开销更大。GeoHash 插入就是算一下编码然后存哈希表，O(1)。R-tree 插入要逐级调整 MBR，最坏情况下可能触发节点分裂，O(log n)。不过对前端来说，12 万条数据的 `tree.load()` 也就几十毫秒，一次性加载完全感受不到。
+
+## 分层聚合：LOD 策略
+
+视口裁剪解决了"不渲染看不见的点"。但还有一个问题：当地图缩到市级甚至省级视图时，即使裁剪完，视口内可能还有几千个点。几千个点挤在一起，不仅看不清，渲染仍然吃性能。
+
+这时候需要分层聚合。思路是这样的：根据当前缩放级别，动态调整点的显示粒度。
+
+**方案一：基于网格聚合**
+
+把地图按像素划分成固定大小的网格（比如 64×64 像素一个格子），每个格子里的点聚合成一个聚合点。聚合点显示数量，点击时展开。
+
+MapLibre GL JS 自带的 cluster 就是这个逻辑：
+
+```javascript
+map.addSource('points', {
+    type: 'geojson',
+    data: pointsGeoJSON,
+    cluster: true,
+    clusterMaxZoom: 14,
+    clusterRadius: 50
+});
+
+map.addLayer({
+    id: 'clusters',
+    type: 'circle',
+    source: 'points',
+    filter: ['has', 'point_count'],
+    paint: {
+        'circle-color': [
+            'step',
+            ['get', 'point_count'],
+            '#51bbd6', 100,  // 小于 100 个
+            '#f1f075', 750,  // 100-750 个
+            '#f28cb1'        // 大于 750 个
+        ],
+        'circle-radius': [
+            'step',
+            ['get', 'point_count'],
+            20, 100,
+            30, 750,
+            40
+        ]
+    }
+});
+```
+
+这个方案的优点是实现简单，MapLibre 和 Mapbox GL JS 都内置了。缺点是网格是固定的，不能根据数据密度自适应调整。
+
+**方案二：基于 GeoHash 的 LOD**
+
+不同缩放级别用不同精度的 GeoHash：
+
+```javascript
+function getGeoHashPrecision(zoom) {
+    if (zoom < 8)  return 3;
+    if (zoom < 11) return 5;
+    if (zoom < 14) return 7;
+    return 9;
+}
+
+// 聚合逻辑：同 GeoHash 前缀的点算一个聚合点
+function aggregateByGeoHash(points, precision) {
+    const buckets = new Map();
+    for (const p of points) {
+        const key = encodeGeoHash(p.lat, p.lng, precision);
+        if (!buckets.has(key)) {
+            buckets.set(key, { count: 0, latSum: 0, lngSum: 0 });
+        }
+        const bucket = buckets.get(key);
+        bucket.count++;
+        bucket.latSum += p.lat;
+        bucket.lngSum += p.lng;
+    }
+    return Array.from(buckets.values()).map(b => ({
+        lat: b.latSum / b.count,
+        lng: b.lngSum / b.count,
+        count: b.count
+    }));
+}
+```
+
+聚合点的坐标用桶内所有点的质心（平均值），这样聚合点能大致代表这个区域点的分布中心。比简单地用格子中心更合理，因为你的数据可能集中在格子的某个角落。
+
+## WebGL 渲染
+
+说了这么多索引和聚合，最后一步才是最关键的——怎么把这些点画到屏幕上。
+
+DOM Marker 在万级以上基本不可用，因为每个 DOM 元素都会参与布局计算。Canvas 2D 稍好一些，十万级能跑但帧率不高。真正能扛百万级的只有 WebGL。
+
+WebGL 的核心优势是：所有点的绘制在一次 Draw Call 里完成。你不需要创建一万个绘制对象，只需要把一个包含一万个顶点坐标的 Buffer 丢给 GPU，GPU 在一帧内全部画完。
+
+Deck.gl 是 Uber 开源的一个 WebGL 地理可视化框架，它的 ScatterplotLayer 专门优化了点渲染：
+
+```javascript
+import { Deck } from '@deck.gl/core';
+import { ScatterplotLayer } from '@deck.gl/layers';
+
+const deck = new Deck({
+    canvas: 'deck-canvas',
+    initialViewState: {
+        longitude: 116.4,
+        latitude: 39.9,
+        zoom: 12
+    },
+    layers: [
+        new ScatterplotLayer({
+            id: 'vehicles',
+            data: points,
+            getPosition: d => [d.lng, d.lat],
+            getRadius: 3,
+            getFillColor: d => d.status === 'online' ? [0, 255, 0] : [255, 0, 0],
+            radiusMinPixels: 2,
+            radiusMaxPixels: 6
+        })
+    ]
+});
+```
+
+Deck.gl 内部做了大量优化：视口裁剪（只处理当前视口内的数据）、WebGL 实例化渲染（一个 Draw Call 画所有点）、以及数据分片加载（不阻塞主线程）。在城市级视图（zoom 10-12）下渲染 10 万个点，帧率可以稳定在 55-60 FPS。
+
+## 实践总结
+
+回到开头的那个 IoT 项目。最终的方案是：
+
+1. **数据层**：后端通过 WebSocket 推送增量更新，前端维护一个内存中的点集
+2. **索引层**：使用 rbush 做 R-tree 索引，每次数据更新后增量更新索引
+3. **渲染层**：使用 Deck.gl 的 ScatterplotLayer，通过 viewport 裁剪 + WebGL 渲染
+4. **交互层**：缩放级别小于 11 时开启聚合，聚合算法用 GeoHash LOD
+
+最终效果：12 万辆车的实时位置，2 秒刷新，地图拖拽缩放时帧率稳定在 50 FPS 以上。
+
+三个要点记住：
+
+- 视口裁剪是性价比最高的优化，先做这个
+- WebGL 不是你想象的那么难，Deck.gl 已经帮你封好了
+- 后端不要全量推，按视口范围做空间过滤，减小网络传输和前端索引压力

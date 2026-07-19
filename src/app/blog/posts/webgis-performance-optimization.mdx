@@ -1,0 +1,213 @@
+---
+title: "WebGIS 性能优化实战：从 10 帧到 60 帧的调优之路"
+summary: "去年年中，我接手了一个智慧园区项目的性能优化。项目本身不算复杂——一个园区级别的三维地图，展示建筑、管线、设备点位，叠加实时 IoT 数据。问题是帧率常年徘徊在 10-15 FPS，拖拽地图有明显的滞后感，甲方已经提了三次投诉。"
+publishedAt: "2021-08-25"
+tag: "WebGIS"
+---
+
+去年年中，我接手了一个智慧园区项目的性能优化。项目本身不算复杂——一个园区级别的三维地图，展示建筑、管线、设备点位，叠加实时 IoT 数据。问题是帧率常年徘徊在 10-15 FPS，拖拽地图有明显的滞后感，甲方已经提了三次投诉。
+
+三个月后，帧率稳定在 55 FPS 以上，加载时间从 8 秒降到 2 秒。下面是我在这个过程中实际用到的优化手段，没有银弹，全是笨功夫。
+
+## 第一步：找到瓶颈在哪
+
+优化之前不做 profiling，等于闭着眼开车。第一步永远是量化问题。
+
+Chrome DevTools 的 Performance 面板是主力工具。录制一段典型操作（打开地图 → 加载数据 → 拖拽 → 缩放），重点关注三个指标：
+
+- **Scripting**：JS 执行时间。如果占比高，说明你的代码算太多了
+- **Rendering**：样式计算、布局、绘制。DOM Marker 多的时候这个值会飙升
+- **GPU**：显存和绘制开销。复杂纹理、大量 Draw Call 集中在这个区域
+
+我录了一段 5 秒的操作，结果是：
+- Scripting：占比 35%，主要卡在空间查询和属性过滤
+- Rendering：占比 50%，大量 DOM Marker 导致布局抖动
+- Idle：只有 15%，浏览器大部分时间在加班
+
+问题很明确：DOM 渲染是最大瓶颈，其次是前端空间计算。路线也就清晰了。
+
+## 第二步：DOM Marker → Canvas / WebGL
+
+三个方案对比：
+
+| 方案 | 1 万个点 | 5 万个点 | 10 万个点 |
+|------|---------|---------|----------|
+| DOM Marker（OpenLayers 默认） | 15 FPS | 3 FPS | 卡死 |
+| Canvas 2D（OpenLayers ImageLayer） | 45 FPS | 25 FPS | 12 FPS |
+| WebGL（Deck.gl / MapLibre） | 60 FPS | 55 FPS | 50 FPS |
+
+数字已经很说明问题了。DOM Marker 在超过 2000 个点后性能会急剧恶化，因为每个 Marker 都是一个独立的 DOM 节点，浏览器要维护它的盒模型、样式计算、层叠上下文。2000 个 DOM 节点的更新，足够让一次重排（reflow）吃掉几百毫秒。
+
+Canvas 2D 好很多，所有点画在一个 canvas 上，浏览器只需要维护一个绘制表面。但 Canvas 2D 的瓶颈在于 JS 线程——每个点都要在 JS 里算好坐标，然后调用 `ctx.arc()` 或 `ctx.fillRect()` 一个一个画。5 万个点，就是 5 万次 JS 函数调用 + 5 万次绘图指令提交，UI 线程被占满。
+
+WebGL 完全不同。你把顶点坐标、颜色、大小一次性打包成 Buffer 丢给 GPU，GPU 在一个 Draw Call 里把所有点画完。CPU 这边几乎不干活，帧率自然上去。
+
+项目里最终用了 Deck.gl 的 GeoJsonLayer 替代原来的 DOM Marker：
+
+```javascript
+// 原来：DOM Marker，一个点一个 DOM 元素
+points.forEach(p => {
+    const marker = new ol.Overlay({
+        position: [p.lng, p.lat],
+        element: createMarkerElement(p)
+    });
+    map.addOverlay(marker);
+});
+
+// 现在：Deck.gl GeoJsonLayer，一次 Draw Call
+const layer = new GeoJsonLayer({
+    id: 'device-points',
+    data: geojson,
+    pointRadiusMinPixels: 4,
+    getFillColor: d => d.properties.status === 'online' ? [0,255,0] : [255,0,0]
+});
+```
+
+改完之后，5 万个设备点从 12 FPS 到了 55 FPS。这步是最直接的收益。
+
+## 第三步：视口裁剪
+
+Canvas 换成 WebGL 之后，帧率问题解决了。但还有一个隐性问题：内存和网络。
+
+项目里的管线数据是 GeoJSON，全量 120MB。虽然不是一次性渲染全部（有 LOD），但全量加载意味着首屏要等 120MB 下载完——在园区内网还行，在互联网环境下，8 秒的加载时间大部分耗在了这里。
+
+解决思路：后端按视口范围做空间过滤，只返回当前视野内的数据。
+
+```javascript
+// 监听地图移动事件，动态请求视口内数据
+map.on('moveend', async () => {
+    const bounds = map.getBounds();
+    const bbox = [
+        bounds.getWest(),   // minLng
+        bounds.getSouth(),  // minLat
+        bounds.getEast(),   // maxLng
+        bounds.getNorth()   // maxLat
+    ];
+
+    // 带上视口范围请求后端
+    const data = await fetch(`/api/pipelines?bbox=${bbox.join(',')}`);
+
+    // 更新数据源
+    source.setData(data);
+});
+```
+
+后端的 SQL 加上空间过滤：
+
+```sql
+SELECT * FROM pipelines
+WHERE geom && ST_MakeEnvelope($1, $2, $3, $4, 4326);
+```
+
+这一步把首屏加载从 120MB 降到了 2-3MB，加载时间从 8 秒降到 2 秒。而且缩放时数据自动按视口裁剪，浏览器内存占用从 800MB 降到了 150MB。
+
+这里有个小坑：`moveend` 事件在地图惯性拖拽时会连续触发很多次。每次触发都去请求后端，等于自建了一个 DDoS。实际项目里需要加 debounce：
+
+```javascript
+const debouncedMoveEnd = debounce(async () => {
+    // ... 上面的请求逻辑
+}, 300);
+
+map.on('moveend', debouncedMoveEnd);
+```
+
+300 毫秒的防抖足够了——用户拖拽地图时手指离开后，通常 300ms 内地图就停稳了。极少情况下用户连续快速拖拽，也只会在最后一次停下后才发请求。
+
+## 第四步：Web Worker 卸载计算
+
+换成 WebGL 之后，还有一个场景偶尔掉帧：空间查询。
+
+项目里有一个"圈选"功能——用户在图上画个多边形，查询里面的设备。数据量大了以后，`turf.booleanPointInPolygon` 逐个点判断要跑很久。5 万个点 × 一个 20 个顶点的多边形，在我的 M1 上跑了大概 400ms——在主线程跑，就是 400ms 的完全卡顿。
+
+这类纯 CPU 计算是最适合丢给 Web Worker 的。
+
+```javascript
+// main.js
+const worker = new Worker('./spatial-query.worker.js');
+
+map.on('draw:created', (e) => {
+    const polygon = e.layer.toGeoJSON();
+
+    worker.postMessage({ type: 'query', polygon, points: allPoints });
+});
+
+worker.onmessage = (e) => {
+    const { results } = e.data;
+    highlightResults(results);
+};
+```
+
+```javascript
+// spatial-query.worker.js
+importScripts('https://unpkg.com/@turf/turf@6/turf.min.js');
+
+self.onmessage = (e) => {
+    const { polygon, points } = e.data;
+    const poly = turf.polygon(polygon.coordinates);
+
+    const results = points.filter(p => {
+        const pt = turf.point([p.lng, p.lat]);
+        return turf.booleanPointInPolygon(pt, poly);
+    });
+
+    self.postMessage({ results });
+};
+```
+
+三条注意事项：
+
+一是 Worker 里不能访问 DOM，所以你必须把数据以 structured clone 的方式传进去。大数据量下这个序列化本身也有开销，不过 5 万个点转成 JSON 也就占用十几毫秒，相比 400ms 的计算省太多。
+
+二是 `importScripts` 会阻塞 Worker，好在只执行一次。如果追求更快，可以用 ES Module Worker（`new Worker('./worker.js', { type: 'module' })`）配合 `import` 语句，但兼容性需要注意。
+
+三是不建议在 Worker 里频繁回传消息。如果数据实时更新（比如车辆 GPS 每秒回传），更好的方案是在 Worker 里维护一份数据副本，主线程只发指令，Worker 只回传结果。
+
+## 第五步：精细化的 LOD
+
+LOD（Level of Detail）不只是"远处画少一点、近处画多一点"。它应该根据要素类型分别定义策略。
+
+园区里有三种数据：建筑（面）、管线（线）、设备（点）。它们的 LOD 策略完全不同：
+
+| 数据类型 | zoom < 12 | 12 ≤ zoom < 15 | zoom ≥ 15 |
+|---------|----------|---------------|----------|
+| 建筑 | 仅显示轮廓（简化面） | 显示高度信息 | 全量显示，贴纹理 |
+| 管线 | 合并成单线 | 主干管线 | 全量显示 |
+| 设备 | 聚合显示数量 | 按类型聚合 | 全量单独显示 |
+
+管线在 zoom < 12 时合并成单线，是怎么实现的？你可以在数据库层面做：`ST_Simplify` 抽稀 + `ST_Union` 合并。或者后端预先准备三套不同精度的数据——低精度用 50 米容差的 Douglas-Peucker 抽稀结果，中精度用 10 米，高精度保留原始数据。前端根据缩放级别请求不同的数据源。
+
+不要所有缩放级别共用一套数据。这是在用最坏情况决定全局体验。
+
+## 第六步：瓦片化大数据
+
+120MB 的管线 GeoJSON 是一个文件——这本身就是一个反模式。把所有数据塞到一个 GeoJSON 里，不仅下载慢，解析也慢。JSON.parse 一个 120MB 的文件，V8 引擎大概需要 1.5 秒，而且解析出的对象直接占 300MB+ 内存。
+
+瓦片化的思路是：把数据按空间切成小块，前端只加载视口内的瓦片。
+
+```javascript
+map.addSource('pipelines-tiles', {
+    type: 'vector',
+    tiles: ['https://tileserver.com/pipelines/{z}/{x}/{y}.pbf'],
+    minzoom: 12,
+    maxzoom: 18
+});
+```
+
+矢量瓦片的优势在之前的文章里详细讲过，这里不再展开。只说一点：切换到瓦片化之后，首屏不再需要加载整个数据集——只加载视口内可见的那十几张瓦片，总共不超过 2MB。加上 HTTP/2 的多路复用，瓦片全部并行加载，首屏体验从"先等 8 秒再看地图"变成了"地图先出来，数据跟着刷出来"。
+
+但这个方案要求你做切片预处理。用 T-Rex + PostGIS 或者 tippecanoe 都可以。我一般用 T-Rex，因为它直连数据库、实时出瓦片，不需要维护离线瓦片文件。缺点是高并发下对数据库有压力——这个需要根据项目并发量评估是否值得加一层瓦片缓存（比如 Redis 或者 CDN）。
+
+## 检查清单
+
+写到最后，列一个自检清单。每次接手一个 WebGIS 项目，先过一遍：
+
+- [ ] 是否做了视口裁剪？（只加载看得见的数据）
+- [ ] 是否用了 WebGL 渲染大数据量图层？（超过 2000 个要素就别用 DOM）
+- [ ] Web Worker 是否卸载了 CPU 密集型计算？（空间查询、坐标转换）
+- [ ] 是否按要素类型和缩放级别做了 LOD？
+- [ ] 大数据量是否做了瓦片化？
+- [ ] 实时数据是否用 WebSocket 增量更新？（不要定时全量轮询）
+- [ ] 事件监听是否加了 debounce/throttle？（moveend、zoomend 等高频事件）
+- [ ] 是否检查了内存泄漏？（地图实例销毁时，有没有清理图层、事件监听、定时器？）
+
+性能优化不是玄学，大部分时候你只是缺少一次认真的 profiling。打开 DevTools 的 Performance 面板，录一段操作，瓶颈自己就出来了。

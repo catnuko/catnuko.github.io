@@ -1,0 +1,381 @@
+---
+title: "基于 OpenLayers + GeoJSON 实现可拖拽编辑的矢量图层"
+summary: "大部分 WebGIS 应用的编辑功能都做得很重——弹出表单、填坐标、保存、刷新。用户体验跟在线地图的拖拽交互比起来差了一个时代。"
+publishedAt: "2023-06-05"
+tag: "WebGIS"
+---
+
+大部分 WebGIS 应用的编辑功能都做得很重——弹出表单、填坐标、保存、刷新。用户体验跟在线地图的拖拽交互比起来差了一个时代。
+
+能不能像操作 Figma 那样编辑地图上的要素？拖拽移动、拽角点改形状、双击加节点、选中删除。可以，OpenLayers 的 `ol/interaction` 模块提供了所有基础能力，你需要的是把它们组合起来，处理好数据同步。
+
+这篇文章以一个「可编辑地块」功能为例，从头搭一套完整的矢量编辑工具。
+
+## 基础环境
+
+先起一个最简的地图，加载一个地块 GeoJSON：
+
+```javascript
+import Map from 'ol/Map.js';
+import View from 'ol/View.js';
+import TileLayer from 'ol/layer/Tile.js';
+import VectorLayer from 'ol/layer/Vector.js';
+import VectorSource from 'ol/source/Vector.js';
+import OSM from 'ol/source/OSM.js';
+import GeoJSON from 'ol/format/GeoJSON.js';
+
+// 初始地块数据
+const initialGeojson = {
+    type: 'FeatureCollection',
+    features: [
+        {
+            type: 'Feature',
+            properties: { id: 1, name: '地块A' },
+            geometry: {
+                type: 'Polygon',
+                coordinates: [[
+                    [116.39, 39.91],
+                    [116.40, 39.91],
+                    [116.40, 39.92],
+                    [116.39, 39.92],
+                    [116.39, 39.91]
+                ]]
+            }
+        }
+    ]
+};
+
+// 矢量图层
+const vectorSource = new VectorSource({
+    features: new GeoJSON().readFeatures(initialGeojson, {
+        dataProjection: 'EPSG:4326',
+        featureProjection: 'EPSG:3857'
+    })
+});
+
+const vectorLayer = new VectorLayer({ source: vectorSource });
+
+// 地图
+const map = new Map({
+    target: 'map',
+    layers: [
+        new TileLayer({ source: new OSM() }),
+        vectorLayer
+    ],
+    view: new View({
+        center: [12958800, 4854800],
+        zoom: 15
+    })
+});
+```
+
+## 交互模式切换
+
+编辑工具的核心是模式管理——用户可以在"浏览模式"和"编辑模式"之间切换。浏览模式下点击是选中查看，编辑模式下点击是进入编辑。
+
+```javascript
+// 模式管理
+const Mode = { VIEW: 'view', EDIT: 'edit' };
+let currentMode = Mode.VIEW;
+
+// 交互实例
+let selectInteraction = null;
+let modifyInteraction = null;
+let drawInteraction = null;
+let snapInteraction = null;
+
+function switchMode(mode) {
+    currentMode = mode;
+
+    // 先清理所有旧的 interaction
+    [selectInteraction, modifyInteraction, drawInteraction, snapInteraction]
+        .filter(Boolean)
+        .forEach(interaction => map.removeInteraction(interaction));
+
+    if (mode === Mode.VIEW) {
+        // 浏览模式：只允许点击选中查看信息
+        selectInteraction = new Select({
+            layers: [vectorLayer]
+        });
+        map.addInteraction(selectInteraction);
+
+        selectInteraction.on('select', (e) => {
+            const feature = e.selected[0];
+            if (feature) {
+                showFeatureInfo(feature);
+            }
+        });
+    }
+
+    if (mode === Mode.EDIT) {
+        initEditMode();
+    }
+}
+```
+
+`ol/interaction/Select` 是 OL 内置的点击选择交互。不需要自己写 Canvas 点击检测——OL 内部会用空间索引做 hit test，对于线和面还支持一定像素的容差（`hitTolerance`），用户不需要精确点到线上。
+
+## 编辑模式：移动 + 变形 + 旋转
+
+编辑模式需要三个核心交互：
+
+```javascript
+function initEditMode() {
+    // 1. 选择要编辑的要素
+    selectInteraction = new Select({
+        layers: [vectorLayer]
+    });
+    map.addInteraction(selectInteraction);
+
+    // 2. 修改（Modify）：拖拽顶点、边、整体移动
+    modifyInteraction = new Modify({
+        features: selectInteraction.getFeatures()
+    });
+    map.addInteraction(modifyInteraction);
+
+    // 3. 吸附（Snap）：拖拽时自动吸附到附近的顶点
+    snapInteraction = new Snap({
+        source: vectorSource
+    });
+    map.addInteraction(snapInteraction);
+
+    // 选中要素变化时，同步到修改交互
+    selectInteraction.on('select', (e) => {
+        // 取消选择时，清除修改目标
+        if (e.selected.length === 0) {
+            modifyInteraction.setActive(false);
+        }
+    });
+}
+```
+
+`Modify` 会自动在选中要素上渲染可拖拽的顶点手柄。对于 Polygon，还会在每条边的中点生成一个额外的手柄，拖拽它可以在边上插入新顶点。这些手柄的样式可以通过 `Modify` 的 `style` 参数自定义。
+
+`Snap` 在拖拽时检测鼠标位置附近有没有其他要素的顶点，有的话自动吸附过去。这在编辑相邻地块时非常有用——保证两个地块之间没有缝隙。
+
+到这一步，基本的 CRUD 已经成型了。但拖拽顶点时你会注意到一个细节：默认情况下，`Modify` 在手柄周围有一个很小的命中区域，用户需要把鼠标精确地放到那个小方块上才能拖拽。在大屏或触摸场景下，这个命中区域太小了。用 `pixelTolerance` 调大：
+
+```javascript
+new Modify({
+    features: selectInteraction.getFeatures(),
+    pixelTolerance: 10  // 默认大概是 5-6
+});
+```
+
+## 绘制新要素
+
+画新地块用 `Draw` 交互。画 Polygon 时需要连续点击创建顶点，双击结束绘制。
+
+```javascript
+function startDrawPolygon() {
+    drawInteraction = new Draw({
+        source: vectorSource,
+        type: 'Polygon'
+    });
+
+    map.addInteraction(drawInteraction);
+
+    drawInteraction.on('drawend', (e) => {
+        const feature = e.feature;
+        // 给新要素一个唯一 ID
+        feature.setId(generateId());
+        feature.set('name', '新地块');
+
+        // 自动切换到修改模式，编辑刚画好的要素
+        selectInteraction.getFeatures().clear();
+        selectInteraction.getFeatures().push(feature);
+    });
+}
+```
+
+画完一个地块后立即选中它进入编辑模式——用户画完就直接可以拖拽调整，不需要额外点一下选择。这个流畅感对体验影响很大。
+
+`drawend` 事件里记得给新要素指定 ID。如果没有 ID，后续保存到后端时没法做增量更新——后端不知道这是新建还是修改。
+
+## 删除要素
+
+删除最简单，但有一个用户体验细节：
+
+```javascript
+function deleteSelected() {
+    const selectedFeatures = selectInteraction.getFeatures();
+
+    if (selectedFeatures.getLength() === 0) return;
+
+    const feature = selectedFeatures.item(0);
+    const name = feature.get('name') || '未命名';
+
+    // 确认后删除
+    if (confirm(`确定删除 "${name}"？`)) {
+        vectorSource.removeFeature(feature);
+        selectedFeatures.clear();
+    }
+}
+```
+
+不要上来就用 `Delete` 键绑定——很多用户不知道。在 UI 上放一个红色垃圾桶按钮，hover 时 tooltip 显示快捷键提示（"Delete 键"）。这样两个入口都覆盖了。
+
+## 数据导出：回到 GeoJSON
+
+编辑完成后，需要把数据导出为 GeoJSON 发给后端：
+
+```javascript
+function exportGeoJSON() {
+    const features = vectorSource.getFeatures();
+    const geojson = new GeoJSON().writeFeatures(features, {
+        dataProjection: 'EPSG:4326',
+        featureProjection: 'EPSG:3857',
+        decimals: 6  // 坐标保留 6 位小数
+    });
+
+    return JSON.parse(geojson);
+}
+```
+
+坐标从 EPSG:3857（地图内部用的米坐标）转回 EPSG:4326（经纬度），以便后端存储。`decimals: 6` 控制小数位数——6 位小数对应约 0.11 米的精度，对地块编辑来说足够了，既能保证精度又不会因为浮点累积导致坐标出现 116.40000000000001 这种脏数据。
+
+如果不传 `dataProjection`，OL 会把坐标原样输出——即 EPSG:3857 的米坐标。大部分后端期望的是经纬度，所以这一步不能省。
+
+如果你需要把编辑后的 GeoJSON 展示给用户确认，可以在导出后以格式化的 JSON 显示在一个 code block 里。但更实用的做法是加一个"保存"按钮，点完后直接把 GeoJSON POST 到后端，不在前端做二次展示。
+
+## 撤销/重做
+
+编辑类工具没有撤销/重做基本等于不可用。最简单的实现是用命令栈：
+
+```javascript
+class UndoManager {
+    constructor(source) {
+        this.source = source;
+        this.undoStack = [];
+        this.redoStack = [];
+        this.maxSize = 50;
+        this.snapshot(); // 保存初始状态
+    }
+
+    snapshot() {
+        const geojson = new GeoJSON().writeFeatures(
+            this.source.getFeatures(),
+            { dataProjection: 'EPSG:4326', featureProjection: 'EPSG:3857' }
+        );
+        this.undoStack.push(geojson);
+        if (this.undoStack.length > this.maxSize) {
+            this.undoStack.shift();
+        }
+        this.redoStack = []; // 新操作清空 redo 栈
+    }
+
+    undo() {
+        if (this.undoStack.length <= 1) return; // 至少保留初始状态
+
+        const current = this.undoStack.pop();
+        this.redoStack.push(current);
+
+        const previous = this.undoStack[this.undoStack.length - 1];
+        this.restore(previous);
+    }
+
+    redo() {
+        if (this.redoStack.length === 0) return;
+
+        const next = this.redoStack.pop();
+        this.undoStack.push(next);
+        this.restore(next);
+    }
+
+    restore(geojsonStr) {
+        const features = new GeoJSON().readFeatures(
+            JSON.parse(geojsonStr),
+            { dataProjection: 'EPSG:4326', featureProjection: 'EPSG:3857' }
+        );
+        this.source.clear();
+        this.source.addFeatures(features);
+    }
+}
+```
+
+在 `Modify` 的 `modifyend` 事件和 `Draw` 的 `drawend` 事件中调用 `undoManager.snapshot()`。`modifyend` 在用户松开鼠标时触发——不是在拖拽过程中持续触发，所以每次拖拽只保存一个快照。如果保存得太频繁（比如在 `modifying` 事件里保存），栈会瞬间被填满。
+
+这个基于快照的实现是最朴素的，数据量大时（几千个要素）序列化会有性能开销。更好的做法是只记录增量操作（"移动了顶点 X 从 A 到 B"），但这需要自己维护一套操作协议。对于地块编辑这种场景（通常几十到几百个要素），快照方案完全够用。
+
+## 键盘快捷键
+
+编辑工具少了快捷键，效率对半砍。
+
+```javascript
+document.addEventListener('keydown', (e) => {
+    if (currentMode !== Mode.EDIT) return;
+
+    switch (e.key) {
+        case 'Delete':
+        case 'Backspace':
+            deleteSelected();
+            break;
+        case 'Escape':
+            selectInteraction.getFeatures().clear();
+            break;
+        case 'z':
+            if (e.ctrlKey || e.metaKey) {
+                e.preventDefault();
+                e.shiftKey ? undoManager.redo() : undoManager.undo();
+            }
+            break;
+    }
+});
+```
+
+注意 `Backspace` 也触发删除——很多 Windows 用户习惯用 Backspace 做删除，而不是 Delete 键。`Escape` 取消选中是最自然的操作，不需要额外教用户。
+
+## 完整的编辑工具结构
+
+```javascript
+// 最终的工具类骨架
+class VectorEditor {
+    constructor(map, vectorSource) {
+        this.map = map;
+        this.source = vectorSource;
+        this.mode = 'view';
+        this.select = null;
+        this.modify = null;
+        this.draw = null;
+        this.snap = null;
+        this.undoManager = new UndoManager(vectorSource);
+
+        this.initViewMode();
+    }
+
+    switchMode(mode) { /* ... */ }
+    initViewMode() { /* ... */ }
+    initEditMode() { /* ... */ }
+    startDraw(type = 'Polygon') { /* ... */ }
+    deleteSelected() { /* ... */ }
+    exportGeoJSON() { /* ... */ }
+    undo() { this.undoManager.undo(); }
+    redo() { this.undoManager.redo(); }
+}
+
+// 使用
+const editor = new VectorEditor(map, vectorSource);
+
+document.getElementById('btn-edit').onclick = () => editor.switchMode('edit');
+document.getElementById('btn-view').onclick = () => editor.switchMode('view');
+document.getElementById('btn-draw').onclick = () => editor.startDraw('Polygon');
+document.getElementById('btn-delete').onclick = () => editor.deleteSelected();
+document.getElementById('btn-undo').onclick = () => editor.undo();
+document.getElementById('btn-redo').onclick = () => editor.redo();
+document.getElementById('btn-save').onclick = () => {
+    const geojson = editor.exportGeoJSON();
+    fetch('/api/parcels', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(geojson)
+    });
+};
+```
+
+## 三个容易忽略的细节
+
+**投影一致性**：`readFeatures` 和 `writeFeatures` 的 `dataProjection` 和 `featureProjection` 方向不要搞反。读取时是"从数据坐标（4326）转到地图坐标（3857）"，写入时是"从地图坐标（3857）转到数据坐标（4326）"。
+
+**多要素同时编辑**：`Modify` 默认只编辑选中的第一个要素。如果允许多选编辑，把 `Select` 的 `multi` 设为 `true`，但 `Modify` 的 `features` 里包含多个要素时，操作体验会变差——你不知道拖的是哪个要素的顶点。更合理的做法是一次只编辑一个要素，多选用在批量删除或批量属性修改。
+
+**移动端适配**：`Modify` 的拖拽手柄在手机屏幕上太小。通过 CSS 覆盖默认样式，把手柄半径调大到 12px 以上。OL 的 interaction 样式可以通过 `style` 回调函数完全自定义，包括手柄的大小、颜色、选中态样式。

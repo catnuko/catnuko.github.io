@@ -1,0 +1,140 @@
+---
+title: "Cesium vs iTowns vs Mapbox 3D：三维 WebGIS 引擎横向评测"
+summary: "二维地图圈是三足鼎立，三维 WebGIS 这边也是三个主要选手：CesiumJS、iTowns、Mapbox 3D（Mapbox Standard Style + GL JS v3）。三个引擎的技术路线完全不同，选错了代价很高——不是改几行配置能救回来的。"
+publishedAt: "2026-02-01"
+tag: "WebGIS"
+---
+
+二维地图圈是三足鼎立，三维 WebGIS 这边也是三个主要选手：CesiumJS、iTowns、Mapbox 3D（Mapbox Standard Style + GL JS v3）。三个引擎的技术路线完全不同，选错了代价很高——不是改几行配置能救回来的。
+
+## 三者的基因差异
+
+CesiumJS 出身航天，创始人 Patrick Cozzi 在 AGI（Analytical Graphics, Inc.）做了十年卫星轨道可视化和航天仿真。Cesium 的核心用户一直是航空航天、国防、智慧城市——对精度和地理空间标准的要求极高。
+
+iTowns 出身学术圈，是法国国家地理信息研究所（IGN）和 Laboratoire MATIS 联合开发的开源项目。它的基因是"用 Web 技术做摄影测量数据展示"——倾斜摄影、点云、DSM/DTM 地形。
+
+Mapbox 3D 出身互联网，完全是另一种思路：从二维地图进化到 2.5D/3D，用建筑拉伸（fill-extrusion）和大气散射（atmosphere）模拟三维效果。它不需要真正的三维数据——一个 GeoJSON 加上 `fill-extrusion-height` 属性就能"立起来"。
+
+基因决定能力边界。Cesium 强在全球尺度的三维地球，iTowns 强在城市尺度的摄影测量渲染，Mapbox 3D 强在好看且加载快。
+
+## CesiumJS
+
+**数据格式：3D Tiles 全体系**
+
+Cesium 对 3D Tiles 的支持是最完整的。b3dm（批处理三维模型）、i3dm（实例化三维模型）、pnts（点云）、cmpt（复合瓦片）——四种格式全部原生支持。加载一个城市的倾斜摄影模型（几千个 b3dm 瓦片），一行代码：
+
+```javascript
+const tileset = await Cesium.Cesium3DTileset.fromUrl('/data/city/tileset.json');
+viewer.scene.primitives.add(tileset);
+```
+
+Cesium 会自动处理 LOD 切换、视锥体裁剪、遮挡剔除——不需要开发者操心渲染优化。
+
+**坐标系：地球级**
+
+Cesium 的核心是 `Ellipsoid`——一个 WGS84 椭球体模型。所有数据都在这个椭球体上"贴"着。这意味着 Cesium 天然适合全球尺度的场景：卫星轨道、全球航线、跨洋光纤。从太空缩到城市，再从城市缩回太空——Cesium 的地球缩放体验是三个引擎里最流畅的。
+
+代价是：地方坐标系（比如城市独立坐标系、施工坐标系）在 Cesium 里需要做坐标转换。而且 Cesium 的球面渲染在近距离时会引入微小的精度误差——建筑模型贴着球面放置，大跨度的建筑（比如机场跑道）在地面上会有几厘米的弯曲。大部分场景下可以忽略，但精密工程类应用需要注意。
+
+**性能：中上**
+
+Cesium 的渲染性能在三个引擎里排中间。比 Mapbox 3D 重（因为要渲染完整的 3D 场景），比 iTowns 轻（因为做了更多的优化）。
+
+Cesium 的性能瓶颈通常不在渲染，在数据传输。3D Tiles 的瓦片体积大（一个 b3dm 几百 KB 到几 MB），在移动网络下加载慢。Cesium 提供了 `maximumScreenSpaceError` 参数控制 LOD 切换的激进程度——调大这个值可以显著减少瓦片下载量，代价是模型看起来更粗糙。
+
+**生态与商业**
+
+Cesium ion 是 Cesium 的商业平台，提供 3D Tiles 托管、全球地形、Bing Maps 底图。个人开发者免费额度够用（每月 5GB 流量），商业项目需要付费。CesiumJS 本身是 Apache 2.0 开源，ion 是可选的。
+
+对国内用户来说，Cesium ion 的服务器在海外，加载 3D Tiles 延迟较高。建议自建瓦片服务或者用国内的 3D Tiles 托管方案。如果使用 Cesium ion 的在线服务，需要评估数据跨境合规问题。
+
+## iTowns
+
+**数据格式：点云和摄影测量原生支持**
+
+iTowns 最突出的能力是对点云（LAS/LAZ）和摄影测量数据的处理。它使用 Potree 格式的点云数据（一种优化的八叉树点云结构），并且支持直接从 WMS/WMTS/WCS 等 OGC 标准服务加载数据。
+
+```javascript
+// 加载点云
+const pointCloudSource = new itowns.PotreeSource({
+    url: 'https://example.com/clouds/lyon',
+    source: new itowns.PotreeParser()
+});
+
+const pointCloudLayer = new itowns.GeometryLayer(
+    'pointcloud', new itowns.THREE.Group()
+);
+pointCloudLayer.source = pointCloudSource;
+view.addLayer(pointCloudLayer);
+```
+
+iTowns 内部使用 Three.js 做渲染，所以它的渲染能力等同于 Three.js 的上限——自定义 Shader、后处理效果、光照模型，想改什么改什么。
+
+**坐标系：地球级 + 平面投影自由切换**
+
+iTowns 支持两种视图模式：`GlobeView`（地球模式，类似 Cesium）和 `PlanarView`（平面投影模式，适合小范围城市数据）。这个设计很聪明——大范围用地球模式，小范围切到平面模式，避免球面弯曲带来的精度问题。
+
+`PlanarView` 可以直接使用 EPSG:3946（法国 Lambert-93）或其他平面投影坐标系。在国内场景下可以用 CGCS2000 的平面投影——这比 Cesium 的椭球体方案在局部精度上更可靠。
+
+**性能：上限高，下限低**
+
+iTowns 的性能表现两极分化。在最佳配置下（合理的 LOD 层级、优化的点云格式），它的渲染帧率能超过 Cesium——因为 Three.js 的 WebGL 管线比 Cesium 的更轻量。但在默认配置下，iTowns 几乎不做自动优化——你需要手动调 LOD 参数、手写数据预处理 Pipeline。
+
+点云渲染尤其需要精细调优。1000 万个点的点云在 Cesium 上能跑 30 FPS，在默认配置的 iTowns 上可能只有 10 FPS。调好之后能跑到 45 FPS——但"调好"的过程比自己写一个点云渲染器简单不了太多。
+
+**生态：弱**
+
+iTowns 的社区远不如 Cesium 和 Mapbox 活跃。GitHub issues 回复慢、示例少、中文资料几乎为零。如果你在公司里选型 iTowns，要做好"遇到问题只能读源码"的心理准备。
+
+适合场景：点云密集型项目、摄影测量数据展示、法国/欧洲的政府项目（IGN 有官方技术支持）、需要自由控制 Three.js 渲染管线的场景。
+
+## Mapbox 3D（Standard Style）
+
+**数据格式：矢量瓦片 + 样式驱动**
+
+Mapbox 3D 的核心思路是：你没有三维模型也没关系，给我二维的 GeoJSON，我来帮你"拉高"成三维。
+
+建筑拉伸只需要一个 GeoJSON Polygon 加一个 `height` 属性：
+
+```json
+{
+    "type": "Feature",
+    "properties": { "height": 45 },
+    "geometry": {
+        "type": "Polygon",
+        "coordinates": [...]
+    }
+}
+```
+
+Mapbox 会把 `height` 转成 `fill-extrusion-height`，自动渲染成有顶面的三维建筑体。配合 Mapbox 的大气散射、实时光影、自由倾斜视角，效果非常接近真正的三维场景——但它背后没有任何三维模型，只是一堆拉伸的多边形。
+
+2025 年发布的 Mapbox Standard Style 加入了 3D 地标建筑（全球主要城市的知名建筑有真实三维模型）、动态天气效果、实时交通光流。Mapbox 的 3D 场景越来越像 Cesium，但加载速度快得多——因为底图是矢量瓦片（KB 级），不是 3D Tiles（MB 级）。
+
+**性能：最佳**
+
+Mapbox 3D 是三个引擎里最轻量的。它的 3D 效果本质上还是二维矢量瓦片的渲染扩展——fill-extrusion 的几何复杂度远低于真正的 3D 模型。所以性能最好：大城市中心 60 FPS 无压力。
+
+不是说 Mapbox 不能加载真正的三维模型。GL JS v3.4+ 支持加载 3D 模型（glTF），但这个功能的稳定性和表现力都远不如 Cesium——适合在一张矢量地图上点缀几个三维建筑，不适合做全城的三维数字孪生。
+
+**生态：受限于商业许可**
+
+Mapbox GL JS v2 开始使用非开源许可。v3 的 Standard Style 和 3D 功能绑定在 Mapbox 的付费服务上。免费额度每月 50000 次地图加载，超出后按量计费。MapLibre 继承了 v1 的开源代码和社区，但 MapLibre 没有 Mapbox Standard Style 的授权，无法使用 3D 建筑、天气、光照等高级效果。
+
+对国内用户来说还有个问题：Mapbox 服务器在海外，底图加载速度慢。虽然可以自建矢量瓦片服务，但 Standard Style 的很多效果是服务端算出来的，本地部署无法完整复现。
+
+## 最终选型矩阵
+
+| 需求 | 选 Cesium | 选 iTowns | 选 Mapbox 3D |
+|------|-----------|-----------|-------------|
+| 全球三维地球 | ✅ | ✅ | ❌ 不是真地球 |
+| 数字孪生（BIM/3D模型） | ✅ | ⚠️ 能做但调优累 | ❌ 不是真 3D |
+| 点云 | ⚠️ 支持但不强 | ✅ 核心优势 | ❌ |
+| 倾斜摄影 | ✅ | ✅ | ❌ |
+| 2.5D 城市可视化 | ⚠️ 太重 | ⚠️ 太重 | ✅ 最佳 |
+| 美观度 | 中 | 低 | 最高 |
+| 国内坐标系支持 | 需要转换 | 原生支持 PlanarView | 仅 EPSG:3857 |
+| 学习成本 | 中 | 高 | 最低 |
+| 开源程度 | Apache 2.0 | MIT/CeCILL-B | 非开源（付费） |
+
+一个务实的建议：如果你的项目必须展示真实的三维模型或倾斜摄影数据，Cesium 是最稳妥的选择。如果只是想让二维地图"看起来像 3D"，Mapbox 3D 最快最省钱。如果你做一个纯粹的点云可视化系统，iTowns 值得啃一下。

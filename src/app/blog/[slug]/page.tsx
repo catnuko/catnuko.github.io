@@ -102,7 +102,9 @@ export default async function Blog({ params }: { params: Promise<{ slug: string 
             <Text variant="body-default-xs" onBackground="neutral-weak" marginBottom="12">
               {post.metadata.publishedAt && formatDate(post.metadata.publishedAt)}
             </Text>
-            <Heading variant="display-strong-m">{post.metadata.title}</Heading>
+            <Heading variant="display-strong-s" wrap="balance" align="center">
+              {post.metadata.title}
+            </Heading>
             {post.metadata.subtitle && (
               <Text
                 variant="body-default-l"

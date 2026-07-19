@@ -1,0 +1,226 @@
+---
+title: "做一个能交付的 GIS 可视化大屏，从数据到动效全流程"
+summary: "GIS 可视化大屏是一个很特殊的品类。它既不是数据分析工具，也不是业务管理系统——它的核心目的就一个：让人一眼看明白。领导来视察、展会上演示、监控中心挂墙，场景不同，但目标一致：信息密度高、视觉效果好、操作零门槛。"
+publishedAt: "2023-02-15"
+tag: "WebGIS"
+---
+
+GIS 可视化大屏是一个很特殊的品类。它既不是数据分析工具，也不是业务管理系统——它的核心目的就一个：**让人一眼看明白**。领导来视察、展会上演示、监控中心挂墙，场景不同，但目标一致：信息密度高、视觉效果好、操作零门槛。
+
+我做过四个大屏项目，踩过的坑比填上的多。这篇文章不教你怎么用 ECharts 画柱状图，只讲一个 GIS 大屏从接到需求到交付的全链路。
+
+## 需求拆解
+
+拿到需求文档的第一步不是打开 VS Code，而是问清三件事：
+
+**1. 物理环境**
+
+屏幕分辨率是多少？常见的几种：
+- 1920×1080（普通显示器 / 会议室电视）
+- 3840×2160（4K 大屏）
+- 5760×1080（三屏拼接）
+- 7680×2160 或更宽（多屏拼接，拼接墙）
+
+分辨率直接决定你的设计稿尺寸和渲染压力。三块 1080P 拼接的实际分辨率是 5760×1080，等同于将近 800 万像素。如果用 Canvas 2D 渲染地图，在这个分辨率下 60 帧几乎不可能，必须上 WebGL。
+
+还有一个容易忽视的问题：如果不是标准 16:9 比例，元素的横向和纵向分布要重新调整。我曾经做过一个 32:9 的超宽屏，两端的地图是主要视觉焦点，中间的图表反而成了"陪衬"——跟常规 16:9 的布局逻辑完全不同。
+
+**2. 使用场景**
+
+是一直挂着不动（监控中心场景），还是有交互操作（展厅触摸屏场景）？
+
+监控中心场景：大屏 24 小时运行，数据自动刷新。要考虑内存泄漏问题——某些图表库长时间运行会积累内存、动画帧不释放。这个场景下，宁可牺牲一些动画效果，也要保证稳定性。
+
+展厅场景：用户可能触摸操作，需要交互元素足够大，至少 44px 的触摸目标。还要考虑自动轮播——没人操作时，大屏自动切换视图。
+
+领导视察场景：核心指标要放到最大、最显眼的位置，次要信息可以收起来。不要太"技术流"——领导关心的是总数、趋势、排名，不是空间索引原理。
+
+**3. 数据源**
+
+是实时推送（WebSocket / MQTT），还是定时轮询，还是静态数据？
+
+实时数据的挑战在于更新频率。如果 1000 个设备的 GPS 每秒推送一次，你不能每秒都重新渲染整个地图。需要做增量更新——只更新变动的那个 Marker，不影响其他元素。这个在架构阶段就要想清楚。
+
+## 布局设计：三分法
+
+大屏布局我总结了一个三分法：
+
+```
+┌─────────────────────────────────────────────┐
+│      标题栏（10% 高度）                       │
+├──────┬──────────────────────────┬───────────┤
+│ 左面板 │                        │  右面板     │
+│ 图表A │      地图主区域           │  图表D     │
+│ 20%  │       （60%）            │  20%      │
+│ 图表B │                        │  图表E     │
+│      │                        │           │
+│ 图表C │                        │  图表F     │
+├──────┴──────────────────────────┴───────────┤
+│      底部数据流 / 告警信息栏（8% 高度）         │
+└─────────────────────────────────────────────┘
+```
+
+地图占 60%，是视觉重心。左右两侧放辅助图表，各 20%。顶部标题栏和底部信息栏不参与主要信息展示，各占 10% 和 8% 左右。
+
+地图用什么？根据数据量选：
+- 业务数据少（< 1000 个要素）、精度要求低 → ECharts 的地图组件（`geo` + `scatter`），开发最快
+- 需要真实地理底图、矢量瓦片、3D 效果 → MapLibre GL JS 或 Cesium
+
+大屏项目里 MapLibre GL JS 用得最多，因为它的渲染效果好、自定义样式能力强，而且不依赖任何外部服务（别忘了大屏往往部署在内网）。
+
+图表用什么？ECharts 是不二之选——生态丰富、大屏定制能力强、动画效果好。重点不是用哪种图表库，而是图表和地图的颜色体系保持一致：
+- 深色背景（#0a0f1e 左右），减少屏幕反光
+- 霓虹色系（#00f0ff、#ff4d4f、#ffe033）高对比度
+- 渐变和发光效果，不用纯色
+
+深色背景是大屏的标配——浅色背景在 55 寸屏幕上就是一块巨大的发光板，会议室里所有人都会觉得刺眼。
+
+## 数据流设计
+
+大屏的数据链路通常是：
+
+```
+数据源 → 后端聚合 → WebSocket 推送 → 前端状态管理 → 渲染
+```
+
+不推荐前端直接轮询数据库。原因有两个：一是安全问题（数据源密码暴露在前端），二是大屏的刷新频率是统一的（比如所有数据每 5 秒刷新一次），前端各自轮询会产生大量不必要的请求。后端统一做聚合和推送更可控。
+
+前端状态管理用 Vuex 或简单的 EventEmitter 就够：
+
+```javascript
+// store.js
+class DataStore {
+    constructor() {
+        this.state = {
+            mapData: null,      // 地图业务数据
+            stats: {},          // 统计指标
+            alerts: [],         // 告警列表
+            trends: []          // 趋势数据
+        };
+        this.listeners = [];
+    }
+
+    update(key, value) {
+        this.state[key] = value;
+        this.listeners.forEach(fn => fn(key, value));
+    }
+}
+
+// WebSocket 接入
+const ws = new WebSocket('ws://server/dashboard');
+
+ws.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    store.update('mapData', data.mapData);
+    store.update('stats', data.stats);
+};
+```
+
+不要每次收到 WebSocket 消息就全量刷新整个页面。各组件各自订阅自己关心的 state key，只在数据变化时更新对应的图表。这样 1000 个设备点位中只有一个设备的状态变了，就只更新那个点位，地图的其他图层完全不受影响。
+
+## 地图动效
+
+大屏地图上的动效分两种：动画（自动播放，不需要交互）和交互（响应用户操作）。
+
+**飞线效果**
+
+飞线是大屏的标配——从 A 城市到 B 城市画一条流动的弧线。用 Deck.gl 的 ArcLayer 最简单：
+
+```javascript
+new ArcLayer({
+    id: 'flight-lines',
+    data: [
+        { from: [116.4, 39.9], to: [121.5, 31.2] },  // 北京 → 上海
+        // ...
+    ],
+    getSourcePosition: d => d.from,
+    getTargetPosition: d => d.to,
+    getSourceColor: [0, 128, 255],
+    getTargetColor: [0, 255, 255],
+    getWidth: 2
+});
+```
+
+ArcLayer 自带动画效果——飞线会从起点到终点流动。如果 Deck.gl 不能和你的底层地图（比如 Cesium）无缝集成，也可以自己用 Canvas 实现：在 Canvas 上用二次贝塞尔曲线画弧线，用 `requestAnimationFrame` 逐帧更新虚线偏移量，模拟流动。
+
+**数字滚动**
+
+左上角那个"今日订单 12,034,567"的数字是慢慢滚上去的，不是直接跳变。这个效应用 `countUp.js` 或者自己写一个：
+
+```javascript
+function animateValue(el, start, end, duration) {
+    const startTime = performance.now();
+
+    function update(currentTime) {
+        const elapsed = currentTime - startTime;
+        const progress = Math.min(elapsed / duration, 1);
+        // easeOutCubic 缓动
+        const eased = 1 - Math.pow(1 - progress, 3);
+        const current = Math.floor(start + (end - start) * eased);
+        el.textContent = current.toLocaleString();
+
+        if (progress < 1) {
+            requestAnimationFrame(update);
+        }
+    }
+
+    requestAnimationFrame(update);
+}
+```
+
+数字用 `toLocaleString` 加千分位分隔符——"12034567"和"12,034,567"的可读性差距巨大。
+
+**呼吸灯 / 脉冲效果**
+
+地图上的设备点位需要呼吸灯效果：圆形从中心向外扩散并逐渐消失，循环播放。
+
+CSS 动画实现最简单：
+
+```css
+.pulse {
+    position: absolute;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: rgba(0, 255, 255, 0.6);
+    animation: pulse 2s ease-out infinite;
+}
+
+.pulse::after {
+    content: '';
+    position: absolute;
+    top: -10px; left: -10px;
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    border: 2px solid rgba(0, 255, 255, 0.6);
+    animation: pulse-ring 2s ease-out infinite;
+}
+
+@keyframes pulse-ring {
+    0% { transform: scale(0.5); opacity: 1; }
+    100% { transform: scale(2.0); opacity: 0; }
+}
+```
+
+唯一的限制：这个方案依赖 DOM Overlay，如果地图本身是 WebGL 渲染的，Overlay 的位置同步需要持续计算（地图移动时每个 Overlay 都要重新定位）。如果用 Deck.gl 或者 MapLibre 的自定义 Layer，可以在 WebGL 层面实现呼吸效果——Shader 里用 `sin(u_time)` 控制透明度和大小，性能更好。
+
+## 交付前的检查项
+
+**自适应测试**。浏览器偶尔会缩放（用户误触 Ctrl+滚轮），大屏的每个组件都要在 100% 缩放下测试。推荐用 `transform: scale` 锁定布局：
+
+```css
+.dashboard {
+    width: 5760px;
+    height: 1080px;
+    transform-origin: top left;
+}
+```
+
+然后根据实际窗口大小动态计算 scale 值。
+
+**性能验证**。Chrome DevTools → Performance Monitor，关注 JS Heap Size 是否持续增长。长时间运行的内存泄漏是大屏项目的头号杀手——我曾经有一个项目上线第一周很正常，第二周开始越来越卡，排查几天才发现是某个图表组件每次数据更新都创建新的 Canvas 而不释放旧的。解决方案是加一套完整的组件销毁逻辑，在 `beforeDestroy` 生命周期里手动 dispose。
+
+**色彩校准**。大屏的实际显示效果跟开发用的显示器可能不一样。LED 拼接屏的色域和亮度跟普通 LCD 显示器差异很大。如果条件允许，部署前在目标屏幕上实测一次颜色——同样的 RGB 值在大屏上可能看起来完全不同。
+
+**断线处理**。WebSocket 断了怎么办？自动重连，并显示重连状态。数据超时未刷新怎么办？不要显示过期数据，改成"--"或者灰色。大屏挂在墙上，没人会去按 F5 刷新——所有异常情况必须自动恢复。

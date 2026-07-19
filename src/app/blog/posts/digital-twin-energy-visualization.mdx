@@ -1,0 +1,259 @@
+---
+title: "Web 端城市数字孪生：Cesium + IoT 实时数据驱动的建筑能耗可视化"
+summary: "2024 年接了一个智慧园区的项目，甲方要求在 Web 端做一个建筑的数字孪生体，能实时看每栋楼的能耗数据、空调运行状态、电梯位置。"
+publishedAt: "2024-04-25"
+tag: "WebGIS"
+---
+
+2024 年接了一个智慧园区的项目，甲方要求在 Web 端做一个建筑的数字孪生体，能实时看每栋楼的能耗数据、空调运行状态、电梯位置。
+
+当时我脑子里第一反应：这得用 Unreal Engine 吧？后来琢磨了一圈，发现 CesiumJS 加上几个关键的技术组件，完全能搞定。
+
+这篇文章完整记录这个项目的技术选型和核心实现。
+
+## 为什么不是 Unreal Engine？
+
+UE 的渲染效果确实比 Web 端好一个量级，但有个致命问题：甲方的人不会用。每次想看数据都要装客户端、配环境、更新版本。Web 端点一个链接就打开了，部署和维护成本几乎为零。
+
+渲染效果的差距在缩小。CesiumJS 1.100 之后支持了 PBR（物理渲染）材质、实时光影、后处理效果。对于建筑级别的数字孪生场景，Cesium 的表现力完全够用——大部分智慧园区演示里，观众关心的是数据可视化效果和交互流畅度，不是水面反射有多逼真。
+
+## 整体架构
+
+```
+┌────────────────────┐
+│  IoT 传感器层        │  温度/湿度/电流/电梯状态
+│  (MQTT Broker)      │
+└───────┬────────────┘
+        │
+┌───────▼────────────┐
+│  数据处理层          │  Node.js / WebSocket
+│  (数据聚合+过滤+推送) │
+└───────┬────────────┘
+        │
+┌───────▼────────────┐
+│  数字孪生层          │  CesiumJS
+│  (3D渲染+数据可视化)  │
+└────────────────────┘
+```
+
+数据流：IoT 设备每秒上报 → MQTT Broker → 后端聚合（按建筑、按楼层汇总）→ WebSocket 推送到前端 → Cesium 更新建筑材质和标签。
+
+## 第一步：加载建筑模型
+
+建筑物用 3D Tiles 加载。3D Tiles 是 Cesium 的原生数据格式，支持 LOD（不同距离加载不同精度的模型）、批量渲染、空间索引。一个园区的几十栋建筑，用 3D Tiles 可以做到流畅的 60 帧。
+
+数据生产路径：CAD/BIM 原始模型 → Cesium ion 在线转换 / FME / 自己写转换脚本 → 3D Tiles（b3dm 格式）。
+
+如果甲方没有 BIM 模型（太常见了），退一步：用建筑底面多边形（GeoJSON）在 Cesium 里拉伸成白模：
+
+```javascript
+// 从 GeoJSON 生成白模
+const buildings = Cesium.GeoJsonDataSource.load(
+    '/data/buildings.geojson',
+    {
+        clampToGround: true  // 贴地
+    }
+);
+
+// 给每个建筑加高度
+buildings.then(dataSource => {
+    const entities = dataSource.entities.values;
+    entities.forEach(entity => {
+        const height = entity.properties.height.getValue();
+        entity.polygon.extrudedHeight = height;
+        entity.polygon.material = Cesium.Color.fromCssColorString('#4a90d9');
+    });
+});
+```
+
+白模虽然简单，但有高度信息，比平面地图直观得多。关键是要有每栋楼的真实高度数据——从甲方拿竣工图纸上找。
+
+## 第二步：建筑与数据绑定
+
+每栋楼在建模时就要分配唯一 ID，这个 ID 对应 IoT 平台上的设备分组。
+
+Cesium 里每个 Entity 都有一个 `id` 属性，跟建筑编号对应：
+
+```javascript
+// 建筑加载时指定 ID
+const buildingEntity = viewer.entities.add({
+    id: 'B-01',  // 建筑编号
+    polygon: {
+        hierarchy: coordinates,
+        extrudedHeight: 45.0,
+        material: Cesium.Color.WHITE
+    }
+});
+
+// WebSocket 收到数据后更新
+ws.onmessage = (msg) => {
+    const { buildingId, powerUsage, temperature } = JSON.parse(msg.data);
+
+    const entity = viewer.entities.getById(buildingId);
+    if (!entity) return;
+
+    // 更新能耗指示器
+    updateEnergyIndicator(entity, powerUsage);
+};
+```
+
+## 第三步：能耗可视化
+
+能耗数据落地的第一个挑战：怎么把"这栋楼当前用 320kW"这个数字，变成视觉上能感知的东西？
+
+我试过三种方案：
+
+**方案 A：颜色映射（最常用）**
+
+```javascript
+function powerToColor(kw) {
+    // 假设 0-500kW 的范围
+    const ratio = Math.min(kw / 500, 1);
+
+    if (ratio < 0.5) {
+        // 低能耗：绿色渐变到黄色
+        return Cesium.Color.lerp(
+            Cesium.Color.GREEN,
+            Cesium.Color.YELLOW,
+            ratio * 2
+        );
+    } else {
+        // 高能耗：黄色渐变到红色
+        return Cesium.Color.lerp(
+            Cesium.Color.YELLOW,
+            Cesium.Color.RED,
+            (ratio - 0.5) * 2
+        );
+    }
+}
+```
+
+颜色映射的优点是直观——一眼看出哪栋楼能耗异常。但从绿色渐变到红色，对红绿色盲用户不友好。考虑过用蓝色到橙色的渐变（色盲友好色系），但甲方坚持"红色表示告警"这个行业惯例，最终还是用了绿→黄→红。
+
+**方案 B：高度映射（戏剧性强）**
+
+让能耗高的建筑"长高"：
+
+```javascript
+const baseHeight = entity.properties.baseHeight;
+entity.polygon.extrudedHeight = baseHeight + powerUsage * 0.1;
+```
+
+这个效果在演示时很出彩。但有一个问题：数字孪生的建筑高度应该反映真实高度，高度映射打破了"孪生"的本意。最终只用在了一套"展示模式"里——平时用颜色映射，领导视察时切换到高度映射，视觉冲击力更强。
+
+**方案 C：热力纹理（信息密度高）**
+
+如果真的想要体验好，在建筑表面铺一层热力图纹理：
+
+```javascript
+// 生成一个动态的热力 Canvas
+const canvas = document.createElement('canvas');
+canvas.width = 256;
+canvas.height = 256;
+const ctx = canvas.getContext('2d');
+
+// 画热力渐变
+const gradient = ctx.createLinearGradient(0, 0, 256, 0);
+gradient.addColorStop(0, 'blue');
+gradient.addColorStop(0.5, 'yellow');
+gradient.addColorStop(1, 'red');
+
+ctx.fillStyle = gradient;
+ctx.fillRect(0, 0, 256, 256);
+
+// 应用到 Cesium 材质
+entity.polygon.material = new Cesium.ImageMaterialProperty({
+    image: canvas
+});
+```
+
+建筑表面会出现蓝色到红色的渐变，蓝色代表低能耗区域，红色代表高能耗区域。信息密度比纯色高，但需要配合图例，不然观众完全不知道蓝色和红色分别代表什么。
+
+## 第四步：室内层级数据
+
+到了这一步，楼层级别的能耗就没办法用建筑外表面展示了。需要在 Cesium 里做室内层级。
+
+室内层级本质上是一个裁剪平面问题。把建筑模型沿高度切成多个分段，每个分段独立着色：
+
+```javascript
+// 楼层能耗
+const floorData = [
+    { floor: 1, usage: 120 },
+    { floor: 2, usage: 98 },
+    { floor: 3, usage: 150 },
+    { floor: 4, usage: 250 },
+    { floor: 5, usage: 80 }
+];
+
+const floorHeight = 3.5; // 层高 3.5 米
+
+floorData.forEach((floor, index) => {
+    viewer.entities.add({
+        id: `B-01-F${floor.floor}`,
+        box: {
+            dimensions: new Cesium.Cartesian3(30, 20, floorHeight),
+            material: powerToColor(floor.usage).withAlpha(0.7)
+        },
+        position: Cesium.Cartesian3.fromDegrees(
+            lng, lat, index * floorHeight
+        ),
+    });
+});
+```
+
+`box` 是最简单的方式。更精细的做法是从 BIM 模型提取每层的几何体做 3D Tiles，但这个的前提是 BIM 模型本身就分好了楼层。很多老建筑的 BIM 模型只是一个整体的外表面，没有内部结构，这时候 box 是最务实的方案。
+
+## 第五步：实时告警与动效
+
+能耗超标时不能只是颜色变了——毕竟颜色是渐变过渡的，观众可能注意不到。需要明显的告警动画。
+
+```javascript
+function showAlert(entity) {
+    // 建筑闪烁
+    let alpha = 1;
+    let increasing = false;
+
+    viewer.clock.onTick.addEventListener(function tick() {
+        alpha += increasing ? 0.02 : -0.02;
+        if (alpha >= 1) increasing = false;
+        if (alpha <= 0.3) increasing = true;
+
+        entity.polygon.material = Color.RED.withAlpha(alpha);
+    });
+}
+```
+
+闪烁效果直接，但不要太快——太快像故障报警，会制造不必要的紧张感。大概 2 秒一个周期比较合适。另外闪烁动画会持续消耗 CPU（每帧都在更新材质 alpha 值），如果同时有多栋楼告警，帧率会明显下降。解决方法是限制同时闪烁的建筑数量——多条告警时只让最严重的一栋闪烁，其他只是红色常亮。
+
+## 性能考虑
+
+数字孪生场景的数据刷新频率很高——几百个 IoT 设备每秒都在推送数据。
+
+**不要在每一帧都更新 Entity 属性。** Cesium 的 `Entity API` 每次属性变更都会触发内部更新，高频调用会阻塞渲染线程。
+
+正确的做法是用一个 buffer 层做数据聚合，按固定频率（比如 2 秒一次）批量更新：
+
+```javascript
+class DataBuffer {
+    constructor(updateInterval = 2000) {
+        this.buffer = new Map();  // buildingId → latest data
+        this.timer = setInterval(() => this.flush(), updateInterval);
+    }
+
+    push(buildingId, data) {
+        this.buffer.set(buildingId, data);  // 只保留最新一条
+    }
+
+    flush() {
+        this.buffer.forEach((data, buildingId) => {
+            const entity = viewer.entities.getById(buildingId);
+            if (entity) updateEntityAppearance(entity, data);
+        });
+        this.buffer.clear();
+    }
+}
+```
+
+这样每 2 秒只更新一次，每栋楼只取最新一条数据（中间值全部丢弃），把更新频率从"每秒 N 次"降低到"每 2 秒 1 次"，渲染压力直接降到原来的几百分之一。
+
+另一个性能注意点：用 `viewer.entities` 管理少量建筑（几十栋）没问题。一旦建筑数量上千，Entity API 的 overhead 就会体现出来——每个 Entity 都是一个 JavaScript 对象，内存和管理成本都不小。上规模的场景应该用 `Cesium3DTileset` + `Cesium3DTileStyle` 做批量着色，而不是逐栋 Entity 操作。

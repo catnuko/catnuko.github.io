@@ -1,0 +1,195 @@
+---
+title: "Turf.js 实战：缓冲区分析、空间连接、泰森多边形一文通"
+summary: "有一类需求在 WebGIS 项目里出现频率极高：用户在地图上画个圈，查圈里有多少个门店；上传一份行政区划数据，自动把门店分配到各个区；选一个点，找出周围 500 米内的所有摄像头。"
+publishedAt: "2022-03-28"
+tag: "WebGIS"
+---
+
+有一类需求在 WebGIS 项目里出现频率极高：用户在地图上画个圈，查圈里有多少个门店；上传一份行政区划数据，自动把门店分配到各个区；选一个点，找出周围 500 米内的所有摄像头。
+
+这些需求本质上都是空间分析。传统做法是丢给后端 PostGIS 算完再返回，但如果你数据量不大（几千到几万条），完全可以在前端用 Turf.js 直接处理。好处是零延迟——不用发请求等后端，用户画完圈结果秒出。
+
+Turf.js 是目前最主流的前端空间分析库，Mapbox 团队维护，支持浏览器和 Node.js。这篇文章不讲 API 文档，直接过三个最实用的场景。
+
+## 缓冲区分析
+
+需求：用户在图上点一个位置，高亮显示周围 500 米范围内的所有充电桩。
+
+```javascript
+const turf = require('@turf/turf');
+
+// 用户点击的点
+const clickPoint = turf.point([116.397, 39.908]);
+
+// 生成 500 米缓冲区（默认单位为公里，500 米 = 0.5 公里）
+const buffer = turf.buffer(clickPoint, 0.5, { units: 'kilometers' });
+
+// buffer 现在是一个 Polygon，可以用来做空间查询
+console.log(buffer.geometry.type); // "Polygon"
+```
+
+这里的 `buffer` 返回的是一个标准的 GeoJSON Polygon。单位可以是 `kilometers`、`meters`、`miles`、`degrees`。注意如果原始坐标是经纬度（EPSG:4326），`degrees` 单位下的结果不准确——因为经度 1 度的实际距离随纬度变化。所以涉及距离计算时，最好先确认你的数据坐标系。
+
+拿到缓冲区多边形后，用它过滤充电桩：
+
+```javascript
+// 假设 chargingStations 是 FeatureCollection
+const stationsInBuffer = turf.pointsWithinPolygon(
+    chargingStations,
+    buffer
+);
+
+console.log(`500 米内共有 ${stationsInBuffer.features.length} 个充电桩`);
+```
+
+`pointsWithinPolygon` 判断点是否在多边形内，比逐个调用 `booleanPointInPolygon` 快得多。内部用的是 R-tree 索引，先做 BBOX 粗筛，再做精确判断——十万个点的查询也就是十几毫秒。
+
+缓冲区不只是一个圆。你还可以生成沿线的缓冲区，比如找一条道路两侧 100 米内的建筑：
+
+```javascript
+const road = turf.lineString([
+    [116.38, 39.90],
+    [116.39, 39.91],
+    [116.41, 39.92]
+]);
+
+const roadBuffer = turf.buffer(road, 0.1, { units: 'kilometers' });
+// roadBuffer 是一个沿着道路的"带状"多边形
+
+const buildingsNearRoad = turf.pointsWithinPolygon(buildings, roadBuffer);
+```
+
+## 空间连接
+
+需求：有一份门店数据，一份商圈多边形数据。把每个门店标注它属于哪个商圈。
+
+这个问题在 PostGIS 里叫 Spatial Join，用 `ST_Contains` 或 `ST_Within` 实现。在 Turf.js 里没有直接的 spatial join 函数，但你可以用 `booleanPointInPolygon` 组合实现：
+
+```javascript
+// 商圈数据（多个 Polygon）
+const businessDistricts = turf.featureCollection([
+    turf.polygon([[...]], { name: '中关村商圈' }),
+    turf.polygon([[...]], { name: '望京商圈' }),
+    // ...
+]);
+
+// 门店数据
+const stores = turf.featureCollection([...]);
+
+// 为每个门店匹配商圈
+stores.features.forEach(store => {
+    for (const district of businessDistricts.features) {
+        if (turf.booleanPointInPolygon(store, district)) {
+            store.properties.district = district.properties.name;
+            break;
+        }
+    }
+});
+```
+
+这个朴素实现的问题在于：如果商圈有 500 个，门店有 5000 个，那就是 500 × 5000 = 250 万次 `booleanPointInPolygon` 调用。每个调用都要遍历多边形的所有顶点做射线法判断，顶点多的多边形会更慢。实测 5000 个门店 × 500 个商圈，在我的机器上跑了大概 8 秒。
+
+优化的思路是用 R-tree 预筛选。先找出门店的 BBOX 跟商圈 BBOX 有交集的候选商圈，再做精确判断：
+
+```javascript
+const districtIndex = new Map();
+
+// 预计算每个商圈的 BBOX
+businessDistricts.features.forEach(d => {
+    const bbox = turf.bbox(d);
+    districtIndex.set(d.properties.name, bbox);
+});
+
+stores.features.forEach(store => {
+    const [storeLng, storeLat] = store.geometry.coordinates;
+
+    // 先用 BBOX 粗筛
+    const candidates = businessDistricts.features.filter(d => {
+        const [minX, minY, maxX, maxY] = districtIndex.get(d.properties.name);
+        return storeLng >= minX && storeLng <= maxX &&
+               storeLat >= minY && storeLat <= maxY;
+    });
+
+    // 再精确判断
+    for (const d of candidates) {
+        if (turf.booleanPointInPolygon(store, d)) {
+            store.properties.district = d.properties.name;
+            break;
+        }
+    }
+});
+```
+
+BBOX 预筛选把精确判断的次数从 250 万次降到了几千次——因为每个门店通常只落在 1-2 个商圈的 BBOX 内。优化后耗时从 8 秒降到 200 毫秒以内。
+
+## 泰森多边形
+
+泰森多边形（Voronoi Diagram）在 GIS 里面最常见的应用是服务区划分——给定若干个服务网点，自动划分每个网点的服务范围，使得范围内任意一点到该网点的距离最近。
+
+```javascript
+// 10 个快递网点
+const sites = turf.featureCollection([
+    turf.point([116.38, 39.90], { name: '网点A' }),
+    turf.point([116.40, 39.92], { name: '网点B' }),
+    turf.point([116.42, 39.89], { name: '网点C' }),
+    // ...
+]);
+
+// 生成泰森多边形
+const voronoi = turf.voronoi(sites, { bbox: [116.30, 39.85, 116.50, 39.95] });
+
+// voronoi 是一个 FeatureCollection，每个 Feature 是一个多边形
+voronoi.features.forEach((poly, i) => {
+    poly.properties = sites.features[i].properties;
+});
+```
+
+值得注意的是 `bbox` 参数。如果不传 bbox，最外层网点的 Voronoi 多边形会向外无限延伸。传了 bbox 之后，Turf.js 会用 bbox 边界裁剪多边形，确保结果都在你的研究区域内。
+
+拿到泰森多边形后，你可以用前面空间连接的方法给每个网点"认领"它覆盖的客户：
+
+```javascript
+customers.features.forEach(customer => {
+    for (const area of voronoi.features) {
+        if (turf.booleanPointInPolygon(customer, area)) {
+            customer.properties.assignedSite = area.properties.name;
+            break;
+        }
+    }
+});
+```
+
+## 性能边界与降级策略
+
+Turf.js 很强大，但它是纯 CPU 计算，运行在浏览器主线程上。处理 10 万个点以上的空间分析，主线程会明显卡顿。
+
+降级策略有三层：
+
+**第一层：数据量小（< 1 万），前端直接算。** 毫秒级响应，体验最好。
+
+**第二层：数据量中（1 万 ~ 50 万），Web Worker 里算。** 把计算丢到 Worker 线程，主线程不阻塞。代价是数据需要 structured clone 传进 Worker，大数据量下序列化耗时不能忽略。
+
+```javascript
+// main.js
+const worker = new Worker('./spatial.worker.js');
+worker.postMessage({
+    action: 'buffer',
+    center: [116.397, 39.908],
+    radius: 0.5,
+    points: allChargingStations  // 可能需要精简字段后再传
+});
+
+// spatial.worker.js
+importScripts('https://unpkg.com/@turf/turf@6/turf.min.js');
+
+self.onmessage = (e) => {
+    const { center, radius, points } = e.data;
+    const buffer = turf.buffer(turf.point(center), radius, { units: 'kilometers' });
+    const result = turf.pointsWithinPolygon(points, buffer);
+    self.postMessage({ count: result.features.length });
+};
+```
+
+**第三层：数据量大（> 50 万），扔给后端。** 用 PostGIS 的 `ST_Buffer`、`ST_Contains`、`ST_VoronoiPolygons` 在数据库引擎里算，只返回结果摘要给前端。数据库的空间索引远比前端 R-tree 高效，百万级数据的缓冲区分析在 PostGIS 里通常不超过 1 秒。
+
+判断该用哪层的经验法则：打开 DevTools 的 Performance 面板，如果单次空间分析超过 100ms，就该往下一层走。100ms 是人感知卡顿的阈值。

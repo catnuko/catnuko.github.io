@@ -1,0 +1,195 @@
+---
+title: "Serverless 架构下的按需瓦片服务：省钱又省心的新选择"
+summary: "给一个政府客户做项目的时候，遇到了一个很尴尬的情况：甲方要求地图服务必须“高可用、按需付费、不能有闲置成本”。说白了就是——平时没什么人用，但演示的时候不能崩，而且别让我花冤枉钱。"
+publishedAt: "2024-08-12"
+tag: "WebGIS"
+---
+
+给一个政府客户做项目的时候，遇到了一个很尴尬的情况：甲方要求地图服务必须"高可用、按需付费、不能有闲置成本"。说白了就是——平时没什么人用，但演示的时候不能崩，而且别让我花冤枉钱。
+
+传统的方案是买一台云服务器跑 GeoServer 或 TileServer GL，但 2 核 4G 的机器一个月大几百，99% 的时间里 CPU 占用不到 5%。算了一笔账，月活的系统日访问量不到 100 次，一年光服务器费用接近一万块——就为了偶尔有人打开看一眼地图。
+
+最后用了 Serverless 方案，把瓦片服务整个搬到云函数上。一年的费用从上万降到了一顿饭钱。
+
+## 为什么传统瓦片服务不适合低频场景
+
+传统的瓦片服务架构：
+
+```
+客户端 → Nginx → TileServer GL / GeoServer → 瓦片存储
+```
+
+服务必须 7×24 小时常驻运行。即使用户一个月只看一次地图，服务器也在那烧钱。
+
+Serverless 的思路：
+
+```
+客户端 → CDN → 云函数（按需执行）→ 对象存储（S3/OSS/COS）
+```
+
+没有人访问时，没有任何资源在运行。有人访问时，云函数冷启动，从对象存储读取瓦片返回。
+
+## 第一步：瓦片存对象存储
+
+把 mbtiles 拆成文件，上传到阿里云 OSS（或 AWS S3）：
+
+```bash
+# 拆 mbtiles 成 z/x/y 文件结构
+mb-util --image_format=pbf china.mbtiles tiles/
+
+# 上传到 OSS（用阿里云 ossutil）
+ossutil cp -r tiles/ oss://my-tiles-bucket/tiles/
+```
+
+对象存储的目录结构直接就是 URL 路径：
+
+```
+https://my-tiles-bucket.oss-cn-beijing.aliyuncs.com/tiles/0/0/0.pbf
+https://my-tiles-bucket.oss-cn-beijing.aliyuncs.com/tiles/1/0/0.pbf
+```
+
+乍一看这已经是可用的瓦片 URL 了——前端直接请求 OSS 的公开 URL 不就行了？
+
+问题在于：
+1. OSS 按外网流量和请求次数计费。如果被恶意刷流量，成本会失控
+2. 对象存储不支持跨域头配置（部分云厂商支持，但不灵活）
+3. 前端直接暴露了 OSS 的 bucket URL，安全风险高
+
+所以需要一个薄薄的网关层——云函数。
+
+## 第二步：云函数作为瓦片代理
+
+用阿里云函数计算（FC）或 AWS Lambda 写一个 20 行的瓦片代理：
+
+```javascript
+// Node.js 云函数
+const OSS = require('ali-oss');
+
+const client = new OSS({
+    region: 'oss-cn-beijing',
+    bucket: 'my-tiles-bucket'
+});
+
+exports.handler = async (event) => {
+    // 从 URL 提取 z/x/y
+    const { z, x, y } = event.pathParameters;
+    const key = `tiles/${z}/${x}/${y}.pbf`;
+
+    try {
+        const result = await client.get(key);
+        return {
+            statusCode: 200,
+            headers: {
+                'Content-Type': 'application/x-protobuf',
+                'Content-Encoding': 'gzip',
+                'Access-Control-Allow-Origin': '*',
+                'Cache-Control': 'public, max-age=86400'  // 缓存一天
+            },
+            body: result.content.toString('base64'),
+            isBase64Encoded: true
+        };
+    } catch (e) {
+        return {
+            statusCode: e.code === 'NoSuchKey' ? 404 : 500,
+            body: ''
+        };
+    }
+};
+```
+
+前端请求 `https://api-gateway/tiles/{z}/{x}/{y}.pbf` → 云函数从 OSS 读取 → 返回 PBF 数据。
+
+加上 API 网关做触发器和限流：
+
+```yaml
+# 阿里云 API 网关配置
+rateLimit: 1000  # 每秒最多 1000 次请求
+cors: true
+timeout: 10000  # 10 秒，瓦片请求要快
+```
+
+## 第三步：CDN 加速
+
+云函数虽然好，但每次都冷启动读取 OSS 太慢了——冷启动 500ms + OSS 读取 200ms，一个瓦片请求要 700ms。地图上 20 个瓦片，总计 14 秒，不可接受。
+
+在 API 网关前面加一层 CDN：
+
+```
+客户端 → CDN（缓存 PBF） → API 网关 → 云函数 → OSS
+```
+
+CDN 配置：
+- 缓存规则：`/tiles/*` 路径缓存，缓存时间 7 天
+- 忽略参数：`?access_token=xxx` 不影响缓存
+- Gzip 压缩：CDN 边缘节点自动 gzip
+
+这样 99% 的瓦片请求全部在 CDN 层命中缓存，回源率极低。`Cache-Control: public, max-age=86400` 确保 CDN 缓存 24 小时（瓦片数据不会频繁更新）。
+
+## 成本分析
+
+以一个省级范围的地图项目为例，瓦片数据约 5GB（z=0~12 的 PBF 瓦片），月 UV 500：
+
+| 项目 | 月成本 | 说明 |
+|------|--------|------|
+| OSS 存储 | ~¥0.50 | 5GB × ¥0.12/GB/月 |
+| OSS 读请求 | ~¥1.00 | CDN 回源量极少 |
+| CDN 流量 | ~¥10.00 | 5GB 瓦片 × 500 UV × 缓存命中 |
+| 云函数 | ~¥0.01 | 调用量极少，大部分缓存命中 |
+| API 网关 | ~¥15.00 | 基础费用 + 请求量定价 |
+| **合计** | **~¥26.50 / 月** | |
+
+对比一台 2 核 4G 的云服务器（约 ¥200~400/月），成本降低了 90% 以上。
+
+而且这个成本结构是弹性的。如果月 UV 从 500 涨到 50000，不需要做任何扩容操作——CDN 和云函数自动扩展。用传统服务器的话 50000 UV 可能得升级到 4 核 8G 再加负载均衡，架构调整至少一周。
+
+## 三个坑
+
+**冷启动延迟**
+
+云函数第一次被调用时，需要初始化运行环境。Node.js 的冷启动一般在 200-500ms。对于瓦片服务来说，这个延迟会叠加到每个要回源的瓦片请求上。
+
+解决办法：给云函数配最低规格的预留实例（1-2 个）。预留实例的费用很低（阿里云大概一个月十几块），但能大幅减少冷启动概率。只在流量波峰时触发弹性扩容——新实例会有冷启动，但绝大部分请求打在预留实例上，冷启动的影响被稀释了。
+
+**对象存储的跨域头**
+
+部分云厂商的对象存储不支持自定义 HTTP 响应头（比如某些版本的 MinIO）。这时候只能通过云函数来添加 CORS 头。确保云函数返回的 `Access-Control-Allow-Origin` 头是前端实际请求的域名，不能用 `*` 如果你同时使用 `withCredentials`。
+
+**PBF 的 gzip**
+
+云函数从 OSS 拿到的 PBF 是没有压缩的，返回时要开 gzip。但注意：如果你在云函数层面用代码做了 gzip 压缩，并且 API 网关也开了 gzip，会出现双重压缩——浏览器收到数据后只解压一次，结果就是乱码。要么在云函数里压缩、网关不压；要么云函数返回原始数据、网关来压。不要两个都压。
+
+## 进阶：按用户做鉴权
+
+如果瓦片服务不是公开的（比如给付费客户使用），可以在云函数里加鉴权：
+
+```javascript
+exports.handler = async (event) => {
+    const token = event.queryParameters?.token;
+
+    // 验证 token
+    if (!validateToken(token)) {
+        return { statusCode: 403, body: 'Forbidden' };
+    }
+
+    // 鉴权通过后再读瓦片
+    const { z, x, y } = event.pathParameters;
+    // ...
+};
+```
+
+但 CDN 缓存了鉴权响应之后，其他用户拿到缓存副本就绕过了鉴权。解决办法是用签名的 URL——每个用户拿到的是带时效签名的临时 URL，跟 CDN 缓存不冲突。
+
+## 适用和不适用场景
+
+适用：
+- 低频访问的内部系统、演示系统
+- 创业团队或非营利项目，预算有限
+- 数据量不大（< 20GB 瓦片），中国省级以下范围
+
+不适用：
+- 高并发场景（CDN 回源压力大，云函数的并发上限可能不够）
+- 数据频繁更新的场景（CDN 缓存刷新成本高）
+- 对延迟极度敏感的场景（冷启动的几百毫秒不能接受）
+- 瓦片数据量超大的全国/全球数据（对象存储的读延迟和费用都会上升）
+
+其实大部分 WebGIS 项目都落在"适用"那一栏里。真正需要 7×24 小时高并发瓦片服务的，除了高德百度那种量级，没几个。

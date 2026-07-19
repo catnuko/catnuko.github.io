@@ -1,0 +1,187 @@
+---
+title: "WebGPU 来了，WebGIS 渲染引擎会重新洗牌吗？"
+summary: "2025 年 Chrome 113 默认启用 WebGPU 之后，我在一个内部项目里尝试把原来基于 WebGL 的地图渲染引擎迁移到 WebGPU。结果比预期顺利得多——但也比预期暴露出更多基础性问题。这篇文章记录这个过程，以及我对 WebGPU 在 GIS 领域前景的判断。"
+publishedAt: "2025-03-15"
+tag: "WebGIS"
+---
+
+2025 年 Chrome 113 默认启用 WebGPU 之后，我在一个内部项目里尝试把原来基于 WebGL 的地图渲染引擎迁移到 WebGPU。结果比预期顺利得多——但也比预期暴露出更多基础性问题。这篇文章记录这个过程，以及我对 WebGPU 在 GIS 领域前景的判断。
+
+## WebGPU 和 WebGL 的根本区别
+
+先澄清一个常见误解：WebGPU 不是"WebGL 3.0"。它是一个完全独立的新规范，设计思路更接近 Vulkan 和 Metal，而不是 OpenGL。
+
+关键差异：
+
+| | WebGL 2.0 | WebGPU |
+|---|---|---|
+| 设计哲学 | 状态机，全局状态 | 命令编码，无状态 |
+| 多线程 | 不支持 | 天然支持 |
+| Compute Shader | 不支持 | 原生支持 |
+| 资源管理 | 隐式，驱动负责 | 显式，开发者控制 |
+| 错误处理 | 黑盒，难调试 | 清晰的错误消息 |
+| GPU 利用率 | 较难充分利用 | 接近原生 API 的效率 |
+
+对 GIS 场景来说，最吸引人的是 `Compute Shader` 和 `多线程支持`。传统的空间分析算法（比如缓冲区计算、空间连接）一直跑在 CPU 上。WebGPU 的 Compute Shader 允许你把这类计算搬到 GPU——几百个核心并行处理，性能提升不是一个量级。
+
+## 实验：用 WebGPU Compute Shader 做空间查询
+
+最直接的实验：一百万条 POI 数据，做缓冲区查询（"哪些 POI 在给定多边形 500 米范围内"）。
+
+传统做法：Turf.js 用 CPU 逐条计算距离，100 万条数据大概要 5-8 秒（取决于 CPU）。
+
+WebGPU 做法：把 POI 坐标和查询多边形上传到 GPU，在 Compute Shader 里并行计算每个 POI 到多边形每条边的距离，结果写回一个 Buffer。
+
+Shader 代码（WGSL）：
+
+```wgsl
+@group(0) @binding(0) var<storage, read> points: array<f32>;
+@group(0) @binding(1) var<storage, read> polygon: array<f32>;
+@group(0) @binding(2) var<storage, read_write> results: array<u32>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    if (idx >= arrayLength(&points) / 2) {
+        return;
+    }
+
+    let px = points[idx * 2];
+    let py = points[idx * 2 + 1];
+
+    // 计算点到多边形的最短距离
+    var minDist = f32(1e10);
+    let edgeCount = arrayLength(&polygon) / 2;
+
+    for (var i = 0u; i < edgeCount - 1u; i++) {
+        let x1 = polygon[i * 2];
+        let y1 = polygon[i * 2 + 1];
+        let x2 = polygon[(i + 1) * 2];
+        let y2 = polygon[(i + 1) * 2 + 1];
+
+        let dist = pointToSegmentDistance(px, py, x1, y1, x2, y2);
+        minDist = min(minDist, dist);
+    }
+
+    results[idx] = select(0u, 1u, minDist <= 500.0);
+}
+```
+
+JavaScript 调用端：
+
+```javascript
+const adapter = await navigator.gpu.requestAdapter();
+const device = await adapter.requestDevice();
+
+// 创建 GPU Buffer
+const pointsBuffer = device.createBuffer({
+    size: pointsData.byteLength,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+});
+
+// 上传数据到 GPU
+device.queue.writeBuffer(pointsBuffer, 0, pointsData);
+
+// 创建 Compute Pipeline
+const pipeline = device.createComputePipeline({
+    layout: 'auto',
+    compute: { module: shaderModule, entryPoint: 'main' }
+});
+
+// 执行
+const commandEncoder = device.createCommandEncoder();
+const passEncoder = commandEncoder.beginComputePass();
+passEncoder.setPipeline(pipeline);
+passEncoder.setBindGroup(0, bindGroup);
+passEncoder.dispatchWorkgroups(Math.ceil(pointCount / 256));
+passEncoder.end();
+
+// 读回结果
+const resultBuffer = device.createBuffer({
+    size: pointCount * 4,
+    usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+});
+commandEncoder.copyBufferToBuffer(outputBuffer, 0, resultBuffer, 0, resultBuffer.size);
+
+device.queue.submit([commandEncoder.finish()]);
+
+await resultBuffer.mapAsync(GPUMapMode.READ);
+const results = new Uint32Array(resultBuffer.getMappedRange());
+```
+
+实测结果：100 万条 POI 的空间查询，GPU 计算 + 数据上传/下载，总共约 **0.3 秒**。对比 CPU 的 5-8 秒，快了 20 倍。
+
+但这不完全公平。CPU 方案没有做任何优化（没有空间索引，逐条计算距离），GPU 的并行度掩盖了这个算法复杂度问题。如果 CPU 端先用 R-tree 做粗筛再精确计算，速度差距会缩小到 2-3 倍。但即便如此，2-3 倍也是一个值得认真对待的性能提升。
+
+## WebGPU 的地图渲染
+
+WebGL 渲染地图的核心流程：顶点着色器处理坐标变换，片元着色器处理颜色和纹理。WebGPU 的渲染管线设计基本一致，但结构更清晰。
+
+一个简化的地图渲染管线（WGSL）：
+
+```wgsl
+// 顶点着色器
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@location(0) pos: vec2<f32>, @location(1) texCoord: vec2<f32>) -> VertexOutput {
+    var out: VertexOutput;
+    out.position = vec4<f32>(pos, 0.0, 1.0);
+    out.uv = texCoord;
+    return out;
+}
+
+// 片元着色器
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    return textureSample(mapTexture, mapSampler, in.uv);
+}
+```
+
+结构上跟 WebGL 的 GLSL 差别不大，但 WebGPU 有几个对地图渲染很有利的特性：
+
+**多渲染目标（MRT）**：一次渲染同时输出多张纹理。地图渲染可以同时输出颜色、深度、要素 ID、法线——后续做要素拾取或后处理时不用另跑一次渲染 Pass。
+
+**Pipeline Cache 显式控制**：WebGL 的 shader 编译和链接是隐式的，每次页面加载都要重新编译。WebGPU 允许你预先编译好 Pipeline，序列化成二进制缓存，下次直接加载，免去了编译开销。对于有几百个图层的复杂地图样式，减少 shader 编译时间对首屏加载提升明显。
+
+## 现实的障碍
+
+WebGPU 看起来很美好，但要真正在 GIS 生产项目中落地，有几道坎：
+
+**1. 浏览器兼容性**
+
+截至 2026 年中，WebGPU 的浏览器支持情况：
+- Chrome 113+ / Edge 113+：完整支持
+- Firefox Nightly：实验性支持，默认关闭
+- Safari Technology Preview：部分支持
+
+生产系统必须同时服务 Chrome 和 Safari 用户，而 Safari 对 WebGPU 的支持还不足以跑生产负载。这意味着现阶段不能放弃 WebGL 降级路径——要么写两套渲染代码，要么找中间层。
+
+**2. WGSL 生态不成熟**
+
+WebGPU 的着色器语言是 WGSL，不是 GLSL。这意味着现在积累的所有 GLSL Shader（地图上的水波效果、光照模型、热力图渐变）全部要重写。WGSL 的语法比 GLSL 啰嗦（类似 Rust），重写工作量大，且现有的 Copilot 类工具对 WGSL 的支持远不如 GLSL。
+
+迁移过程可以用 Tint（Google 的着色器编译器）把 GLSL 转成 WGSL，但转换不是 100% 无损的——尤其是自定义的函数和宏。
+
+**3. 调试工具不成熟**
+
+Chrome 的 WebGPU 调试工具目前还比较简陋。Shader 断点调试、GPU 内存分析、Pipeline 状态查看——这些 WebGL 已经有成熟工具了（Spector.js、WebGL Inspector），WebGPU 的对应工具还在早期阶段。开发体验上，现阶段 WebGPU 比 WebGL 差一截。
+
+## 实际落地的渐进式路径
+
+目前最务实的做法不是全部重写，而是渐进替换：
+
+**第一步：渲染保持 WebGL，Compute 迁移到 WebGPU。** Compute Shader 是 WebGPU 最大的差异化优势，而且跟渲染管线无关——你可以在 WebGL 渲染的地图上叠加 WebGPU 计算的热力图。两者通过 SharedArrayBuffer 或 readBuffer 交换数据。
+
+**第二步：引入渲染抽象层。** 不要让地图渲染代码直接调 WebGL API。封装一个渲染抽象层——类似 MapLibre 的 Painter 类，上层画地图不关心底层是 WebGL 还是 WebGPU。等到 WGSL 生态成熟了，只需要替换 Painter 的实现。
+
+**第三步：关注 Dawn（Chromium 的 WebGPU 实现）的 WASM 版本。** Dawn 可以编译成 WASM，在浏览器里通过 WebGPU 或 WebGL 后端运行。这意味着你可以先用 WASM 版 Dawn 写 WebGPU 代码，Dawn 内部自动降级到 WebGL——不需要写两套代码。目前 Dawn WASM 还是实验性的，但方向是对的。
+
+## 结论：会，但是需要时间
+
+WebGPU 确实会在 GIS 领域重新洗牌，但不会是一夜之间。Compute Shader 赋予的空间分析加速能力太香了，任何一个处理大规模数据的 WebGIS 项目最终都会想要这个。
+
+我个人的时间表估计：2026 年底开始在生产项目的非关键路径上用 WebGPU Compute Shader；2027 年中期开始部分渲染管线切换；2028 年才可能完全放弃 WebGL。

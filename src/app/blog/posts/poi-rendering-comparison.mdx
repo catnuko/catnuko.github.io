@@ -1,0 +1,210 @@
+---
+title: "千万级 POI 点前端渲染方案对比：WebGL / Deck.gl / Three.js"
+summary: "四年前我第一次遇到千万级 POI 渲染需求的时候，脑子里想的还是“用 LOD 分层、按缩放级别聚合、分页加载”。这些思路没错，但落地的时候发现关键瓶颈不在数据组织，而在渲染管线。"
+publishedAt: "2021-12-10"
+tag: "WebGIS"
+---
+
+四年前我第一次遇到千万级 POI 渲染需求的时候，脑子里想的还是"用 LOD 分层、按缩放级别聚合、分页加载"。这些思路没错，但落地的时候发现关键瓶颈不在数据组织，而在渲染管线。
+
+一万个 DOM Marker，浏览器要维护一万个盒模型；十万个 Canvas 2D 点，每个都要走一遍 JS → Canvas API → Skia 的调用栈。量级再往上，常规方案无一例外全部阵亡。
+
+要撑住千万级，核心思路只有一个：别让 CPU 干 GPU 的活。
+
+这篇文章把三种主流的 WebGL 渲染路线放在一起做技术拆解——原生 WebGL、Deck.gl、Three.js——不讲入门教程，重点分析它们的渲染管线差异和选型边界。
+
+## 原生 WebGL：最短路径，最大控制权
+
+如果你的需求是"往屏幕上画 1000 万个圆点，每个点有自己的颜色和大小"，原生 WebGL 是最直接的方案。
+
+核心流程就三步：
+
+**1. 准备数据 Buffer**
+
+```javascript
+const gl = canvas.getContext('webgl2');
+const count = 10_000_000;
+
+// 每个点：x, y, r, g, b, a, size（7 个 float）
+const data = new Float32Array(count * 7);
+
+for (let i = 0; i < count; i++) {
+    const offset = i * 7;
+    // x, y: 经纬度映射到归一化设备坐标（-1 到 1）
+    data[offset + 0] = mercatorX(lngs[i]);
+    data[offset + 1] = mercatorY(lats[i]);
+    // r, g, b, a: 颜色
+    data[offset + 2] = colors[i].r / 255;
+    data[offset + 3] = colors[i].g / 255;
+    data[offset + 4] = colors[i].b / 255;
+    data[offset + 5] = 1.0;
+    // size
+    data[offset + 6] = sizes[i];
+}
+
+const buffer = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+```
+
+1000 万个点 × 7 个 float × 4 字节 = 280MB。这个数据量在 GPU 显存里不算大（主流显卡显存 4GB 起步），但要一次性传入 GPU 需要走 PCIe 总线。280MB 的传输大约需要 20-50ms（取决于 PCIe 版本和系统负载），在首屏加载时可以接受，后续每一帧都应该复用这个 buffer。
+
+注意这里的坐标已经是投影后的值（mercatorX / mercatorY），不是原始经纬度。投影转换在 JS 层完成，这是原生 WebGL 方案的一个额外 CPU 开销——1000 万次墨卡托投影计算大约耗时 150-200ms。这部分可以用 Web Worker 并行化，或者在后端预先处理好。
+
+**2. 写 Shader**
+
+顶点着色器：
+
+```glsl
+attribute vec2 a_position;
+attribute vec4 a_color;
+attribute float a_size;
+
+uniform mat3 u_matrix;     // 地图变换矩阵
+uniform float u_zoom;      // 当前缩放级别
+
+varying vec4 v_color;
+
+void main() {
+    vec2 pos = (u_matrix * vec3(a_position, 1.0)).xy;
+    gl_Position = vec4(pos, 0.0, 1.0);
+    gl_PointSize = a_size * u_zoom;
+    v_color = a_color;
+}
+```
+
+片元着色器：
+
+```glsl
+precision mediump float;
+varying vec4 v_color;
+
+void main() {
+    // 画圆形（GL_POINT 默认是方形，需要手动裁剪成圆形）
+    float dist = length(gl_PointCoord - vec2(0.5));
+    if (dist > 0.5) discard;
+    gl_FragColor = v_color;
+}
+```
+
+`gl_PointCoord` 是 GL_POINT 模式下的内置变量，表示当前片元在 Point 内的归一化坐标（0 到 1）。用 `length(gl_PointCoord - 0.5) > 0.5` 判断是否在圆外，discard 掉圆外的像素。这个操作在片元着色器里每帧对每个点都要执行，1000 万个点就是 1000 万次判断。GPU 处理这种并行计算毫无压力。
+
+**3. 绘制**
+
+```javascript
+gl.useProgram(program);
+gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+
+// 设置 attribute 指针
+gl.vertexAttribPointer(positionLoc, 2, gl.FLOAT, false, 28, 0);
+gl.vertexAttribPointer(colorLoc, 4, gl.FLOAT, false, 28, 8);
+gl.vertexAttribPointer(sizeLoc, 1, gl.FLOAT, false, 28, 24);
+
+gl.drawArrays(gl.POINTS, 0, count);
+```
+
+`28` 是 stride——每个点 7 个 float × 4 字节 = 28 字节。offset 0/8/24 分别对应 x、颜色、大小的偏移量。只要顶点布局设置正确，GPU 会自动把 buffer 里的数据"对齐"到各个 attribute 变量上。
+
+原生 WebGL 的优势很明显：没有中间层，你对每一帧的渲染有完全的控制权。但这套代码只适合渲染点。如果你还要渲染线、面、热力图、3D 建筑——每个几何类型都需要一套不同的 Shader 和 Buffer 管理逻辑，维护成本会爆炸。而且地图坐标系和屏幕坐标系的转换、视口裁剪、数据更新同步，这些都需要自己实现。
+
+## Deck.gl：在 WebGL 上盖了一层 GIS 友好的抽象
+
+Deck.gl 本质上是在原生 WebGL 之上封装了一套"图层"抽象。每个图层（ScatterplotLayer、GeoJsonLayer、ArcLayer 等）内部管理自己的 Buffer、Shader 和渲染逻辑，开发者只要传数据和配置参数。
+
+```javascript
+import { Deck } from '@deck.gl/core';
+import { ScatterplotLayer } from '@deck.gl/layers';
+
+const deck = new Deck({
+    canvas: 'map-canvas',
+    initialViewState: {
+        longitude: 116.4,
+        latitude: 39.9,
+        zoom: 12
+    },
+    layers: [
+        new ScatterplotLayer({
+            id: 'poi-layer',
+            data: '/api/pois?bbox=...',
+            getPosition: d => [d.lng, d.lat],
+            getRadius: d => d.importance * 5,
+            getFillColor: d => categoryColors[d.category],
+            radiusMinPixels: 2,
+            radiusMaxPixels: 20,
+            pickable: true
+        })
+    ]
+});
+```
+
+Deck.gl 帮你在底层做了以下几件事：
+
+- **视口裁剪**：只渲染当前视野内的数据点，视野外的直接跳过。不是简单的 BBOX 判断，而是用投影矩阵在 GPU 上做 frustum culling。
+- **数据更新**：`data` 变化时，自动 diff 并更新 Buffer，不会重建整个图层。
+- **拾取**：`pickable: true` 后，鼠标悬停和点击自动做 GPU-based picking——每个 Feature 分配一个唯一颜色，在离屏 framebuffer 上渲染一次，然后读像素颜色反查 Feature ID。
+- **投影转换**：`getPosition` 返回经纬度，Deck.gl 内部自动处理了 Web 墨卡托投影。
+
+这套封装在你需要同时渲染多种类型数据时价值最大——散点、路径、热力、3D 柱状图、弧线，一个 Deck 实例全搞定，每个 Layer 独立管理自己的数据更新和样式。
+
+性能方面，Deck.gl 的 1000 万散点渲染和原生 WebGL 差距在 10% 以内——主要是多了一层 Layer 生命周期管理和矩阵运算。这个差距在实际项目中很难被感知到。
+
+## Three.js：当你的 GIS 需求越来越像游戏
+
+Three.js 不是 GIS 库，它是一个通用 3D 引擎。但如果你要做的事情超出了"地图"的范畴——动态粒子特效、自定义光照、物理模拟、复杂的 3D 建筑交互——Three.js 的灵活性反而是优势。
+
+Three.js 渲染 POI 点的典型方案——用 InstancedMesh：
+
+```javascript
+import * as THREE from 'three';
+
+const count = 10_000_000;
+
+// 几何体（一个单位球），被实例化 1000 万次
+const geometry = new THREE.SphereGeometry(1, 8, 8);
+const material = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+
+const mesh = new THREE.InstancedMesh(geometry, material, count);
+
+const dummy = new THREE.Object3D();
+const color = new THREE.Color();
+
+for (let i = 0; i < count; i++) {
+    dummy.position.set(xs[i], ys[i], zs[i]);
+    dummy.scale.set(scale, scale, scale);
+    dummy.updateMatrix();
+    mesh.setMatrixAt(i, dummy.matrix);
+
+    color.setHex(colors[i]);
+    mesh.setColorAt(i, color);
+}
+
+mesh.instanceMatrix.needsUpdate = true;
+mesh.instanceColor.needsUpdate = true;
+```
+
+`InstancedMesh` 是 Three.js 提供的一种 GPU 实例化渲染机制。它的原理是：创建一个基础几何体（比如一个球），然后在 GPU 上把这个几何体"复制"出 1000 万份，每份可以有不同的位置矩阵和颜色。所有实例在一个 Draw Call 里完成，性能极佳。
+
+Three.js 的优势在于生态和自由度。想做粒子爆炸效果？加一个 ShaderMaterial。想给建筑加阴影和反射？开 Raytracing。想导入 glTF 模型叠加到地图上？直接 `GLTFLoader`。
+
+但代价也很明显：Three.js 没有地理坐标系的概念。经纬度转 Three.js 世界坐标需要你手写投影函数，地图的缩放和平移需要你自己管理 Camera 和矩阵变换。如果你想让 Three.js 渲染的内容跟底图对齐——比如 Cesium 的 3D Tiles 建筑旁边放 Three.js 的粒子特效——需要做大量坐标系对位工作。这个工作量在项目初期很容易被低估。
+
+## 选型矩阵
+
+| 维度 | 原生 WebGL | Deck.gl | Three.js |
+|------|-----------|---------|---------|
+| 点渲染性能 | ★★★★★ | ★★★★☆ | ★★★★★ |
+| 开发效率 | ★★☆☆☆ | ★★★★★ | ★★★★☆ |
+| GIS 内置支持 | 无 | 完整（投影、瓦片、ViewState） | 无，需手写 |
+| 3D 自由度 | 无上限（全手写） | 中等（预定义 Layer 类型） | 极高 |
+| 复杂 3D 交互 | 极高开发成本 | 较弱 | 强大 |
+| 生态 & 社区 | 小 | 中等 | 极大 |
+| 学习曲线 | 陡峭 | 平缓 | 中等 |
+| 打包体积 | ≈0 | ≈200KB | ≈600KB |
+
+## 一句话总结
+
+- 纯点/线/面的大数据渲染 → **Deck.gl**，开箱即用，不要重复造轮子
+- 需要和 Cesium/MapLibre 做深度融合 + 需要高度自定义的视觉效果 → **原生 WebGL**，控制力最强
+- 你的 WebGIS 已经越来越像一个 3D 交互应用了 → **Three.js**，但要做好自己处理坐标系的准备
+
+实际项目中，混合使用也不少见。我见过一个智慧城市项目：MapLibre 做底图，Deck.gl 做业务数据图层（散点、热力、路径），Three.js 做重点建筑的精细模型展示。三层各自管好自己的渲染上下文，通过统一的 ViewState 同步视角。效果很好，只是架构要提前想清楚，别让三个库互相抢 canvas。
