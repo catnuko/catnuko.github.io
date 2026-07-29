@@ -29,13 +29,22 @@ type PostData = {
   content: string;
 };
 
-function getMDXFiles(dir: string) {
+function getMDXFiles(dir: string): string[] {
   if (!fs.existsSync(dir)) {
-    notFound();
+    return [];
   }
-  return fs.readdirSync(dir).filter(
-    (file) => path.extname(file) === ".mdx" || path.extname(file) === ".md",
-  );
+  const results: string[] = [];
+  for (const item of fs.readdirSync(dir)) {
+    const fullPath = path.join(dir, item);
+    const stat = fs.statSync(fullPath);
+    if (stat.isDirectory()) {
+      // Recurse into subfolders so posts can be grouped by category.
+      results.push(...getMDXFiles(fullPath));
+    } else if (path.extname(item) === ".mdx" || path.extname(item) === ".md") {
+      results.push(fullPath);
+    }
+  }
+  return results;
 }
 
 function readMDXFile(filePath: string) {
@@ -63,9 +72,11 @@ function readMDXFile(filePath: string) {
 
 function getMDXData(dir: string) {
   const mdxFiles = getMDXFiles(dir);
-  return mdxFiles.map((file) => {
-    const { metadata, content } = readMDXFile(path.join(dir, file));
-    const slug = path.basename(file, path.extname(file));
+  return mdxFiles.map((filePath) => {
+    const { metadata, content } = readMDXFile(filePath);
+    // Slug stays as the file basename so public URLs (/blog/<slug>) are stable
+    // regardless of which category folder the file lives in.
+    const slug = path.basename(filePath, path.extname(filePath));
     return { metadata, slug, content };
   });
 }
@@ -82,14 +93,15 @@ export function getArticles(): PostData[] {
 }
 
 // Get a single article by slug from src/app/blog/posts/
+// (searches recursively through category subfolders; slug = file basename)
 export function getArticleBySlug(slug: string): PostData | null {
   const articlesDir = path.join(process.cwd(), "src", "app", "blog", "posts");
-  const filePath = path.join(articlesDir, `${slug}.mdx`);
-
-  if (!fs.existsSync(filePath)) {
-    const articles = getArticles();
-    return articles.find((a) => a.slug === slug) || null;
+  const mdxFiles = getMDXFiles(articlesDir);
+  const match = mdxFiles.find(
+    (file) => path.basename(file, path.extname(file)) === slug,
+  );
+  if (!match) {
+    return null;
   }
-
-  return { ...readMDXFile(filePath), slug };
+  return { ...readMDXFile(match), slug };
 }

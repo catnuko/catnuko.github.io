@@ -33,5 +33,12 @@
     "@types/react": "^19.2.4",
     "@types/react-dom": "^19.2.3",
     "typescript": "^5.8.3"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "11.17.0",
+      "onFail": "download"
+    }
   }
 }

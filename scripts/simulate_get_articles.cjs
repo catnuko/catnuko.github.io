@@ -11,15 +11,26 @@ const fs = require("fs");
 const matter = require("gray-matter");
 
 const articlesDir = path.join(process.cwd(), "src", "app", "blog", "posts");
-const files = fs.readdirSync(articlesDir).filter(f =>
-  path.extname(f) === ".mdx" || path.extname(f) === ".md"
-);
+
+function collectMdFiles(dir) {
+  if (!fs.existsSync(dir)) return [];
+  let out = [];
+  for (const item of fs.readdirSync(dir)) {
+    const full = path.join(dir, item);
+    const stat = fs.statSync(full);
+    if (stat.isDirectory()) out = out.concat(collectMdFiles(full));
+    else if (path.extname(item) === ".mdx" || path.extname(item) === ".md") out.push(full);
+  }
+  return out;
+}
+
+const files = collectMdFiles(articlesDir);
 
 console.log(`Loading ${files.length} articles like utils.ts getArticles() does...\n`);
 
 const allArticles = [];
 for (const file of files) {
-  const rawContent = fs.readFileSync(path.join(articlesDir, file), "utf-8");
+  const rawContent = fs.readFileSync(file, "utf-8");
   const { data, content } = matter(rawContent);
 
   const metadata = {

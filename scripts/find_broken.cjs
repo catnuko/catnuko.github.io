@@ -13,13 +13,26 @@ process.chdir("D:\\code\\catnuko.github.io");
 const matter = require("gray-matter");
 
 const articlesDir = path.join(process.cwd(), "src", "app", "blog", "posts");
-const files = fs.readdirSync(articlesDir).filter(f => f.endsWith(".mdx") || f.endsWith(".md"));
+
+function collectMdFiles(dir) {
+  if (!fs.existsSync(dir)) return [];
+  let out = [];
+  for (const item of fs.readdirSync(dir)) {
+    const full = path.join(dir, item);
+    const stat = fs.statSync(full);
+    if (stat.isDirectory()) out = out.concat(collectMdFiles(full));
+    else if (item.endsWith(".mdx") || item.endsWith(".md")) out.push(full);
+  }
+  return out;
+}
+
+const files = collectMdFiles(articlesDir);
 
 console.log(`Loading ${files.length} articles using project's logic...\n`);
 
 const articles = [];
 for (const file of files) {
-  const fpath = path.join(articlesDir, file);
+  const fpath = file;
   const rawContent = fs.readFileSync(fpath, "utf-8");
   const { data, content } = matter(rawContent);
 
