@@ -22,8 +22,8 @@ function TerrainRgbDemo() {
       })
       viewer.terrainProvider = provider;
       viewer.camera.setView({
-        destination: Cesium.Cartesian3.fromDegrees(4360666.73559397, 877857.4340475124, 4767788.51804),
-        orientation: Cesium.HeadingPitchRoll(0.03406336073690763, -1.4201912416000768, 0.0004336366412127646)
+        destination: new Cesium.Cartesian3(4360666.73559397, 877857.4340475124, 4767788.51804),
+        orientation: new Cesium.HeadingPitchRoll(0.03406336073690763, -1.4201912416000768, 0.0004336366412127646)
       })
     })();
   }, []);

@@ -3,13 +3,14 @@
 import Link from 'next/link';
 
 const DEMOS = [
-  { href: '/demo/cesium', label: 'all' },
-  { href: '/demo/cesium/heatmap', label: 'Heatmap' },
-  { href: '/demo/cesium/circle', label: 'Circle' },
-  { href: '/demo/cesium/mlt', label: 'MLT' },
-  // { href: '/demo/cesium/terrain-rgb', label: 'Terrain-RGB' },
-  { href: '/demo/cesium/hillshade', label: 'Hillshade' },
-  { href: '/demo/cesium/baimo', label: 'fill-extrusion' },
+  { href: '/demo/cesium/', label: '官方页' },
+  { href: '/demo/cesium/playground/', label: 'Playground' },
+  { href: '/demo/cesium/heatmap/', label: 'Heatmap' },
+  { href: '/demo/cesium/circle/', label: 'Circle' },
+  { href: '/demo/cesium/mlt/', label: 'MLT' },
+  { href: '/demo/cesium/terrain-rgb/', label: 'Terrain-RGB' },
+  { href: '/demo/cesium/hillshade/', label: 'Hillshade' },
+  { href: '/demo/cesium/baimo/', label: 'fill-extrusion' },
 ];
 
 /** 轻量悬浮导航：回首页 + 兄弟示例互链，方便在演示间切换 */
