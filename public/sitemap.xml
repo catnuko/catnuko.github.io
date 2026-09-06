@@ -19,4 +19,20 @@
     <loc>https://catnuko.github.io/articles/test-image-emoji</loc>
   <lastmod>2026-04-12</lastmod>
   </url>
+  <url>
+    <loc>https://catnuko.github.io/demo/babylon</loc>
+    <lastmod>2026-09-06</lastmod>
+  </url>
+  <url>
+    <loc>https://catnuko.github.io/demo/babylon/playground</loc>
+    <lastmod>2026-09-06</lastmod>
+  </url>
+  <url>
+    <loc>https://catnuko.github.io/demo/cesium</loc>
+    <lastmod>2026-09-06</lastmod>
+  </url>
+  <url>
+    <loc>https://catnuko.github.io/demo/cesium/playground</loc>
+    <lastmod>2026-09-06</lastmod>
+  </url>
 </urlset>
