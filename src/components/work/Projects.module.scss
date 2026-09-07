@@ -1,3 +1,16 @@
+.grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--static-space-m, 1rem);
+    width: 100%;
+    margin-bottom: 2.5rem;
+    padding: 0 var(--static-space-l, 1.5rem);
+
+    @media (max-width: 800px) {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
 .hover {
     transition: var(--transition-micro-medium);
 

@@ -1,0 +1,24 @@
+.card {
+    display: block;
+    text-decoration: none;
+    transition: var(--transition-micro-medium);
+
+    &:hover {
+        transform: translateY(-4px);
+
+        img {
+            transform: scale(1.03);
+        }
+    }
+
+    img {
+        transition: transform var(--transition-micro-medium);
+    }
+}
+
+.ellipsis {
+    display: block;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}

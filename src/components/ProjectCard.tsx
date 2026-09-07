@@ -1,14 +1,14 @@
 "use client";
 
 import {
-  AvatarGroup,
-  Carousel,
   Column,
-  Flex,
   Heading,
+  Media,
+  Row,
   SmartLink,
   Text,
 } from "@once-ui-system/core";
+import styles from "./ProjectCard.module.scss";
 
 interface ProjectCardProps {
   href: string;
@@ -30,63 +30,87 @@ export const ProjectCard: React.FC<ProjectCardProps> = ({
   avatars,
   link,
 }) => {
+  const isExternal = link.startsWith("http");
+
   return (
-    <Column fillWidth gap="m">
-      <Carousel
-        sizes="(max-width: 960px) 100vw, 960px"
-        items={images.map((image) => ({
-          slide: image,
-          alt: title,
-        }))}
-      />
-      <Flex
-        s={{ direction: "column" }}
+    <SmartLink
+      href={link || href}
+      className={styles.card}
+      target={isExternal ? "_blank" : undefined}
+      rel={isExternal ? "noopener noreferrer" : undefined}
+    >
+      <Row
         fillWidth
-        paddingX="s"
-        paddingTop="12"
-        paddingBottom="24"
-        gap="l"
+        s={{ direction: "column" }}
+        radius="l"
+        border="neutral-alpha-weak"
+        background="neutral-weak"
+        style={{ overflow: "hidden", minHeight: "3.5rem" }}
       >
-        {title && (
-          <Flex flex={5}>
-            <Heading as="h2" wrap="balance" variant="heading-strong-xl">
-              {title}
-            </Heading>
-          </Flex>
+        {images.length > 0 && (
+          <Row
+            s={{ style: { width: "auto" } }}
+            width={16}
+            height={12}
+            style={{ flexShrink: 0, overflow: "hidden" }}
+          >
+            <Media
+              priority
+              sizes="(max-width: 800px) 100vw, 20vw"
+              alt={title}
+              src={images[0]}
+              style={{ width: "100%", height: "100%", objectFit: "cover" }}
+            />
+          </Row>
         )}
-        {(avatars?.length > 0 || description?.trim() || content?.trim()) && (
-          <Column flex={7} gap="16">
-            {avatars?.length > 0 && <AvatarGroup avatars={avatars} size="m" reverse />}
-            {description?.trim() && (
-              <Text wrap="balance" variant="body-default-s" onBackground="neutral-weak">
-                {description}
+        <Column
+          fillWidth
+          paddingX="m"
+          paddingY="8"
+          gap="4"
+          flex={3}
+          vertical="center"
+          style={{ minWidth: 0 }}
+        >
+          <Row fillWidth vertical="center" gap="s">
+            {title && (
+              <Heading
+                as="h3"
+                wrap="balance"
+                variant="heading-strong-xs"
+                className={styles.ellipsis}
+              >
+                {title}
+              </Heading>
+            )}
+          </Row>
+          {description?.trim() && (
+            <Text
+              variant="body-default-xs"
+              onBackground="neutral-weak"
+              className={styles.ellipsis}
+            >
+              {description}
+            </Text>
+          )}
+        </Column>
+        {(content?.trim() || link) && (
+          <Row
+            paddingX="m"
+            paddingY="8"
+            gap="16"
+            vertical="center"
+            s={{ hide: true }}
+            style={{ flexShrink: 0 }}
+          >
+            {content?.trim() && (
+              <Text variant="label-default-s" onBackground="brand-weak">
+                →
               </Text>
             )}
-            <Flex gap="24" wrap>
-              {content?.trim() && (
-                <SmartLink
-                  suffixIcon="arrowRight"
-                  style={{ margin: "0", width: "fit-content" }}
-                  href={href}
-                >
-                  <Text variant="body-default-s">Read case study</Text>
-                </SmartLink>
-              )}
-              {link && (
-                <SmartLink
-                  suffixIcon="arrowUpRightFromSquare"
-                  style={{ margin: "0", width: "fit-content" }}
-                  href={link}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  <Text variant="body-default-s">View project</Text>
-                </SmartLink>
-              )}
-            </Flex>
-          </Column>
+          </Row>
         )}
-      </Flex>
-    </Column>
+      </Row>
+    </SmartLink>
   );
 };
